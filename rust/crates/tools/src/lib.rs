@@ -247,6 +247,49 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
         },
+        ToolSpec {
+            name: "NotebookEdit",
+            description: "Replace, insert, or delete a cell in a Jupyter notebook.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "notebook_path": { "type": "string" },
+                    "cell_id": { "type": "string" },
+                    "new_source": { "type": "string" },
+                    "cell_type": { "type": "string", "enum": ["code", "markdown"] },
+                    "edit_mode": { "type": "string", "enum": ["replace", "insert", "delete"] }
+                },
+                "required": ["notebook_path", "new_source"],
+                "additionalProperties": false
+            }),
+        },
+        ToolSpec {
+            name: "Sleep",
+            description: "Wait for a specified duration without holding a shell process.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "duration_ms": { "type": "integer", "minimum": 0 }
+                },
+                "required": ["duration_ms"],
+                "additionalProperties": false
+            }),
+        },
+        ToolSpec {
+            name: "PowerShell",
+            description: "Execute a PowerShell command with optional timeout.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string" },
+                    "timeout": { "type": "integer", "minimum": 1 },
+                    "description": { "type": "string" },
+                    "run_in_background": { "type": "boolean" }
+                },
+                "required": ["command"],
+                "additionalProperties": false
+            }),
+        },
     ]
 }
 
@@ -264,6 +307,9 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),
         "Agent" => from_value::<AgentInput>(input).and_then(run_agent),
         "ToolSearch" => from_value::<ToolSearchInput>(input).and_then(run_tool_search),
+        "NotebookEdit" => from_value::<NotebookEditInput>(input).and_then(run_notebook_edit),
+        "Sleep" => from_value::<SleepInput>(input).and_then(run_sleep),
+        "PowerShell" => from_value::<PowerShellInput>(input).and_then(run_powershell),
         _ => Err(format!("unsupported tool: {name}")),
     }
 }
@@ -327,6 +373,18 @@ fn run_agent(input: AgentInput) -> Result<String, String> {
 
 fn run_tool_search(input: ToolSearchInput) -> Result<String, String> {
     to_pretty_json(execute_tool_search(input))
+}
+
+fn run_notebook_edit(input: NotebookEditInput) -> Result<String, String> {
+    to_pretty_json(execute_notebook_edit(input)?)
+}
+
+fn run_sleep(input: SleepInput) -> Result<String, String> {
+    to_pretty_json(execute_sleep(input))
+}
+
+fn run_powershell(input: PowerShellInput) -> Result<String, String> {
+    to_pretty_json(execute_powershell(input).map_err(|error| error.to_string())?)
 }
 
 fn to_pretty_json<T: serde::Serialize>(value: T) -> Result<String, String> {
@@ -419,6 +477,43 @@ struct ToolSearchInput {
     max_results: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+struct NotebookEditInput {
+    notebook_path: String,
+    cell_id: Option<String>,
+    new_source: String,
+    cell_type: Option<NotebookCellType>,
+    edit_mode: Option<NotebookEditMode>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum NotebookCellType {
+    Code,
+    Markdown,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum NotebookEditMode {
+    Replace,
+    Insert,
+    Delete,
+}
+
+#[derive(Debug, Deserialize)]
+struct SleepInput {
+    duration_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct PowerShellInput {
+    command: String,
+    timeout: Option<u64>,
+    description: Option<String>,
+    run_in_background: Option<bool>,
+}
+
 #[derive(Debug, Serialize)]
 struct WebFetchOutput {
     bytes: usize,
@@ -480,6 +575,25 @@ struct ToolSearchOutput {
     total_deferred_tools: usize,
     #[serde(rename = "pending_mcp_servers")]
     pending_mcp_servers: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize)]
+struct NotebookEditOutput {
+    new_source: String,
+    cell_id: Option<String>,
+    cell_type: NotebookCellType,
+    language: String,
+    edit_mode: String,
+    error: Option<String>,
+    notebook_path: String,
+    original_file: String,
+    updated_file: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SleepOutput {
+    duration_ms: u64,
+    message: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1153,6 +1267,316 @@ fn slugify_agent_name(description: &str) -> String {
     out.trim_matches('-').chars().take(32).collect()
 }
 
+fn execute_notebook_edit(input: NotebookEditInput) -> Result<NotebookEditOutput, String> {
+    let path = std::path::PathBuf::from(&input.notebook_path);
+    if path.extension().and_then(|ext| ext.to_str()) != Some("ipynb") {
+        return Err(String::from(
+            "File must be a Jupyter notebook (.ipynb file).",
+        ));
+    }
+
+    let original_file = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    let mut notebook: serde_json::Value =
+        serde_json::from_str(&original_file).map_err(|error| error.to_string())?;
+    let language = notebook
+        .get("metadata")
+        .and_then(|metadata| metadata.get("kernelspec"))
+        .and_then(|kernelspec| kernelspec.get("language"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("python")
+        .to_string();
+    let cells = notebook
+        .get_mut("cells")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| String::from("Notebook cells array not found"))?;
+
+    let edit_mode = input.edit_mode.unwrap_or(NotebookEditMode::Replace);
+    let target_index = resolve_cell_index(cells, input.cell_id.as_deref(), edit_mode)?;
+    let resolved_cell_type = input.cell_type.unwrap_or_else(|| {
+        cells
+            .get(target_index)
+            .and_then(|cell| cell.get("cell_type"))
+            .and_then(serde_json::Value::as_str)
+            .map(|kind| {
+                if kind == "markdown" {
+                    NotebookCellType::Markdown
+                } else {
+                    NotebookCellType::Code
+                }
+            })
+            .unwrap_or(NotebookCellType::Code)
+    });
+
+    let cell_id = match edit_mode {
+        NotebookEditMode::Insert => {
+            let new_id = make_cell_id(cells.len());
+            let new_cell = json!({
+                "cell_type": match resolved_cell_type { NotebookCellType::Code => "code", NotebookCellType::Markdown => "markdown" },
+                "id": new_id,
+                "metadata": {},
+                "source": source_lines(&input.new_source),
+                "outputs": [],
+                "execution_count": serde_json::Value::Null,
+            });
+            let insert_at = if input.cell_id.is_some() {
+                target_index + 1
+            } else {
+                0
+            };
+            cells.insert(insert_at, new_cell);
+            cells
+                .get(insert_at)
+                .and_then(|cell| cell.get("id"))
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string)
+        }
+        NotebookEditMode::Delete => {
+            let removed = cells.remove(target_index);
+            removed
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string)
+        }
+        NotebookEditMode::Replace => {
+            let cell = cells
+                .get_mut(target_index)
+                .ok_or_else(|| String::from("Cell index out of range"))?;
+            cell["source"] = serde_json::Value::Array(source_lines(&input.new_source));
+            cell["cell_type"] = serde_json::Value::String(match resolved_cell_type {
+                NotebookCellType::Code => String::from("code"),
+                NotebookCellType::Markdown => String::from("markdown"),
+            });
+            cell.get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string)
+        }
+    };
+
+    let updated_file =
+        serde_json::to_string_pretty(&notebook).map_err(|error| error.to_string())?;
+    std::fs::write(&path, &updated_file).map_err(|error| error.to_string())?;
+
+    Ok(NotebookEditOutput {
+        new_source: input.new_source,
+        cell_id,
+        cell_type: resolved_cell_type,
+        language,
+        edit_mode: format_notebook_edit_mode(edit_mode),
+        error: None,
+        notebook_path: path.display().to_string(),
+        original_file,
+        updated_file,
+    })
+}
+
+fn execute_sleep(input: SleepInput) -> SleepOutput {
+    std::thread::sleep(Duration::from_millis(input.duration_ms));
+    SleepOutput {
+        duration_ms: input.duration_ms,
+        message: format!("Slept for {}ms", input.duration_ms),
+    }
+}
+
+fn execute_powershell(input: PowerShellInput) -> std::io::Result<runtime::BashCommandOutput> {
+    let _ = &input.description;
+    let shell = detect_powershell_shell();
+    execute_shell_command(
+        shell,
+        &input.command,
+        input.timeout,
+        input.run_in_background,
+    )
+}
+
+fn detect_powershell_shell() -> &'static str {
+    if command_exists("pwsh") {
+        "pwsh"
+    } else {
+        "powershell"
+    }
+}
+
+fn command_exists(command: &str) -> bool {
+    std::process::Command::new("sh")
+        .arg("-lc")
+        .arg(format!("command -v {command} >/dev/null 2>&1"))
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn execute_shell_command(
+    shell: &str,
+    command: &str,
+    timeout: Option<u64>,
+    run_in_background: Option<bool>,
+) -> std::io::Result<runtime::BashCommandOutput> {
+    if run_in_background.unwrap_or(false) {
+        let child = std::process::Command::new(shell)
+            .arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-Command")
+            .arg(command)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        return Ok(runtime::BashCommandOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            raw_output_path: None,
+            interrupted: false,
+            is_image: None,
+            background_task_id: Some(child.id().to_string()),
+            backgrounded_by_user: Some(false),
+            assistant_auto_backgrounded: Some(false),
+            dangerously_disable_sandbox: None,
+            return_code_interpretation: None,
+            no_output_expected: Some(true),
+            structured_content: None,
+            persisted_output_path: None,
+            persisted_output_size: None,
+        });
+    }
+
+    let mut process = std::process::Command::new(shell);
+    process
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg(command);
+    process
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    if let Some(timeout_ms) = timeout {
+        let mut child = process.spawn()?;
+        let started = Instant::now();
+        loop {
+            if let Some(status) = child.try_wait()? {
+                let output = child.wait_with_output()?;
+                return Ok(runtime::BashCommandOutput {
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                    raw_output_path: None,
+                    interrupted: false,
+                    is_image: None,
+                    background_task_id: None,
+                    backgrounded_by_user: None,
+                    assistant_auto_backgrounded: None,
+                    dangerously_disable_sandbox: None,
+                    return_code_interpretation: status
+                        .code()
+                        .filter(|code| *code != 0)
+                        .map(|code| format!("exit_code:{code}")),
+                    no_output_expected: Some(output.stdout.is_empty() && output.stderr.is_empty()),
+                    structured_content: None,
+                    persisted_output_path: None,
+                    persisted_output_size: None,
+                });
+            }
+            if started.elapsed() >= Duration::from_millis(timeout_ms) {
+                let _ = child.kill();
+                let output = child.wait_with_output()?;
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                let stderr = if stderr.trim().is_empty() {
+                    format!("Command exceeded timeout of {timeout_ms} ms")
+                } else {
+                    format!(
+                        "{}
+Command exceeded timeout of {timeout_ms} ms",
+                        stderr.trim_end()
+                    )
+                };
+                return Ok(runtime::BashCommandOutput {
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr,
+                    raw_output_path: None,
+                    interrupted: true,
+                    is_image: None,
+                    background_task_id: None,
+                    backgrounded_by_user: None,
+                    assistant_auto_backgrounded: None,
+                    dangerously_disable_sandbox: None,
+                    return_code_interpretation: Some(String::from("timeout")),
+                    no_output_expected: Some(false),
+                    structured_content: None,
+                    persisted_output_path: None,
+                    persisted_output_size: None,
+                });
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    let output = process.output()?;
+    Ok(runtime::BashCommandOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        raw_output_path: None,
+        interrupted: false,
+        is_image: None,
+        background_task_id: None,
+        backgrounded_by_user: None,
+        assistant_auto_backgrounded: None,
+        dangerously_disable_sandbox: None,
+        return_code_interpretation: output
+            .status
+            .code()
+            .filter(|code| *code != 0)
+            .map(|code| format!("exit_code:{code}")),
+        no_output_expected: Some(output.stdout.is_empty() && output.stderr.is_empty()),
+        structured_content: None,
+        persisted_output_path: None,
+        persisted_output_size: None,
+    })
+}
+
+fn resolve_cell_index(
+    cells: &[serde_json::Value],
+    cell_id: Option<&str>,
+    edit_mode: NotebookEditMode,
+) -> Result<usize, String> {
+    if cells.is_empty()
+        && matches!(
+            edit_mode,
+            NotebookEditMode::Replace | NotebookEditMode::Delete
+        )
+    {
+        return Err(String::from("Notebook has no cells to edit"));
+    }
+    if let Some(cell_id) = cell_id {
+        cells
+            .iter()
+            .position(|cell| cell.get("id").and_then(serde_json::Value::as_str) == Some(cell_id))
+            .ok_or_else(|| format!("Cell id not found: {cell_id}"))
+    } else {
+        Ok(0)
+    }
+}
+
+fn source_lines(source: &str) -> Vec<serde_json::Value> {
+    if source.is_empty() {
+        return vec![serde_json::Value::String(String::new())];
+    }
+    source
+        .split_inclusive('\n')
+        .map(|line| serde_json::Value::String(line.to_string()))
+        .collect()
+}
+
+fn format_notebook_edit_mode(mode: NotebookEditMode) -> String {
+    match mode {
+        NotebookEditMode::Replace => String::from("replace"),
+        NotebookEditMode::Insert => String::from("insert"),
+        NotebookEditMode::Delete => String::from("delete"),
+    }
+}
+
+fn make_cell_id(index: usize) -> String {
+    format!("cell-{}", index + 1)
+}
+
 fn parse_skill_description(contents: &str) -> Option<String> {
     for line in contents.lines() {
         if let Some(value) = line.strip_prefix("description:") {
@@ -1190,6 +1614,9 @@ mod tests {
         assert!(names.contains(&"Skill"));
         assert!(names.contains(&"Agent"));
         assert!(names.contains(&"ToolSearch"));
+        assert!(names.contains(&"NotebookEdit"));
+        assert!(names.contains(&"Sleep"));
+        assert!(names.contains(&"PowerShell"));
     }
 
     #[test]
@@ -1394,6 +1821,118 @@ mod tests {
         assert!(contents.contains("Audit the branch"));
         assert!(contents.contains("Check tests and outstanding work."));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn notebook_edit_replaces_and_inserts_cells() {
+        let path = std::env::temp_dir().join(format!(
+            "clawd-notebook-{}.ipynb",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::write(
+            &path,
+            r#"{
+  "cells": [
+    {"cell_type": "code", "id": "cell-a", "metadata": {}, "source": ["print(1)\n"], "outputs": [], "execution_count": null}
+  ],
+  "metadata": {"kernelspec": {"language": "python"}},
+  "nbformat": 4,
+  "nbformat_minor": 5
+}"#,
+        )
+        .expect("write notebook");
+
+        let replaced = execute_tool(
+            "NotebookEdit",
+            &json!({
+                "notebook_path": path.display().to_string(),
+                "cell_id": "cell-a",
+                "new_source": "print(2)\n",
+                "edit_mode": "replace"
+            }),
+        )
+        .expect("NotebookEdit replace should succeed");
+        let replaced_output: serde_json::Value = serde_json::from_str(&replaced).expect("json");
+        assert_eq!(replaced_output["cell_id"], "cell-a");
+        assert_eq!(replaced_output["cell_type"], "code");
+
+        let inserted = execute_tool(
+            "NotebookEdit",
+            &json!({
+                "notebook_path": path.display().to_string(),
+                "cell_id": "cell-a",
+                "new_source": "# heading\n",
+                "cell_type": "markdown",
+                "edit_mode": "insert"
+            }),
+        )
+        .expect("NotebookEdit insert should succeed");
+        let inserted_output: serde_json::Value = serde_json::from_str(&inserted).expect("json");
+        assert_eq!(inserted_output["cell_type"], "markdown");
+        let final_notebook = std::fs::read_to_string(&path).expect("read notebook");
+        assert!(final_notebook.contains("print(2)"));
+        assert!(final_notebook.contains("# heading"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn sleep_waits_and_reports_duration() {
+        let started = std::time::Instant::now();
+        let result =
+            execute_tool("Sleep", &json!({"duration_ms": 20})).expect("Sleep should succeed");
+        let elapsed = started.elapsed();
+        let output: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(output["duration_ms"], 20);
+        assert!(output["message"]
+            .as_str()
+            .expect("message")
+            .contains("Slept for 20ms"));
+        assert!(elapsed >= Duration::from_millis(15));
+    }
+
+    #[test]
+    fn powershell_runs_via_stub_shell() {
+        let dir = std::env::temp_dir().join(format!(
+            "clawd-pwsh-bin-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let script = dir.join("pwsh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+while [ "$1" != "-Command" ] && [ $# -gt 0 ]; do shift; done
+shift
+printf 'pwsh:%s' "$1"
+"#,
+        )
+        .expect("write script");
+        std::process::Command::new("chmod")
+            .arg("+x")
+            .arg(&script)
+            .status()
+            .expect("chmod");
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", dir.display(), original_path));
+
+        let result = execute_tool(
+            "PowerShell",
+            &json!({"command": "Write-Output hello", "timeout": 1000}),
+        )
+        .expect("PowerShell should succeed");
+
+        std::env::set_var("PATH", original_path);
+        let _ = std::fs::remove_dir_all(dir);
+
+        let output: serde_json::Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(output["stdout"], "pwsh:Write-Output hello");
+        assert!(output["stderr"].as_str().expect("stderr").is_empty());
     }
 
     struct TestServer {
