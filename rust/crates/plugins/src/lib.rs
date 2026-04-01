@@ -1098,6 +1098,7 @@ impl PluginManager {
         let registry = self.load_registry()?;
         let mut plugins = Vec::new();
         let mut seen_ids = BTreeSet::<String>::new();
+        let mut seen_paths = BTreeSet::<PathBuf>::new();
 
         for install_path in discover_plugin_dirs(&self.install_root())? {
             let matched_record = registry
@@ -1111,6 +1112,23 @@ impl PluginManager {
             );
             let plugin = load_plugin_definition(&install_path, kind, source, kind.marketplace())?;
             if seen_ids.insert(plugin.metadata().id.clone()) {
+                seen_paths.insert(install_path);
+                plugins.push(plugin);
+            }
+        }
+
+        for record in registry.plugins.values() {
+            if seen_paths.contains(&record.install_path) {
+                continue;
+            }
+            let plugin = load_plugin_definition(
+                &record.install_path,
+                record.kind,
+                describe_install_source(&record.source),
+                record.kind.marketplace(),
+            )?;
+            if seen_ids.insert(plugin.metadata().id.clone()) {
+                seen_paths.insert(record.install_path.clone());
                 plugins.push(plugin);
             }
         }
@@ -1165,17 +1183,15 @@ impl PluginManager {
             .clone()
             .unwrap_or_else(Self::bundled_root);
         let bundled_plugins = discover_plugin_dirs(&bundled_root)?;
-        if bundled_plugins.is_empty() {
-            return Ok(());
-        }
-
         let mut registry = self.load_registry()?;
         let mut changed = false;
         let install_root = self.install_root();
+        let mut active_bundled_ids = BTreeSet::new();
 
         for source_root in bundled_plugins {
             let manifest = load_plugin_from_directory(&source_root)?;
             let plugin_id = plugin_id(&manifest.name, BUNDLED_MARKETPLACE);
+            active_bundled_ids.insert(plugin_id.clone());
             let install_path = install_root.join(sanitize_plugin_id(&plugin_id));
             let now = unix_time_ms();
             let existing_record = registry.plugins.get(&plugin_id);
@@ -1214,6 +1230,24 @@ impl PluginManager {
                 },
             );
             changed = true;
+        }
+
+        let stale_bundled_ids = registry
+            .plugins
+            .iter()
+            .filter_map(|(plugin_id, record)| {
+                (record.kind == PluginKind::Bundled && !active_bundled_ids.contains(plugin_id))
+                    .then_some(plugin_id.clone())
+            })
+            .collect::<Vec<_>>();
+
+        for plugin_id in stale_bundled_ids {
+            if let Some(record) = registry.plugins.remove(&plugin_id) {
+                if record.install_path.exists() {
+                    fs::remove_dir_all(&record.install_path)?;
+                }
+                changed = true;
+            }
         }
 
         if changed {
@@ -2480,6 +2514,117 @@ mod tests {
             .any(|plugin| plugin.metadata.id == "sample-hooks@bundled"));
 
         let _ = fs::remove_dir_all(config_home);
+    }
+
+    #[test]
+    fn bundled_sync_prunes_removed_bundled_registry_entries() {
+        let config_home = temp_dir("bundled-prune-home");
+        let bundled_root = temp_dir("bundled-prune-root");
+        let stale_install_path = config_home
+            .join("plugins")
+            .join("installed")
+            .join("stale-bundled-external");
+        write_bundled_plugin(&bundled_root.join("active"), "active", "0.1.0", false);
+        write_file(
+            stale_install_path.join(MANIFEST_RELATIVE_PATH).as_path(),
+            r#"{
+  "name": "stale",
+  "version": "0.1.0",
+  "description": "stale bundled plugin"
+}"#,
+        );
+
+        let mut config = PluginManagerConfig::new(&config_home);
+        config.bundled_root = Some(bundled_root.clone());
+        config.install_root = Some(config_home.join("plugins").join("installed"));
+        let manager = PluginManager::new(config);
+
+        let mut registry = InstalledPluginRegistry::default();
+        registry.plugins.insert(
+            "stale@bundled".to_string(),
+            InstalledPluginRecord {
+                kind: PluginKind::Bundled,
+                id: "stale@bundled".to_string(),
+                name: "stale".to_string(),
+                version: "0.1.0".to_string(),
+                description: "stale bundled plugin".to_string(),
+                install_path: stale_install_path.clone(),
+                source: PluginInstallSource::LocalPath {
+                    path: bundled_root.join("stale"),
+                },
+                installed_at_unix_ms: 1,
+                updated_at_unix_ms: 1,
+            },
+        );
+        manager.store_registry(&registry).expect("store registry");
+
+        let installed = manager
+            .list_installed_plugins()
+            .expect("bundled sync should succeed");
+        assert!(installed
+            .iter()
+            .any(|plugin| plugin.metadata.id == "active@bundled"));
+        assert!(!installed
+            .iter()
+            .any(|plugin| plugin.metadata.id == "stale@bundled"));
+
+        let registry = manager.load_registry().expect("load registry");
+        assert!(!registry.plugins.contains_key("stale@bundled"));
+        assert!(!stale_install_path.exists());
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(bundled_root);
+    }
+
+    #[test]
+    fn installed_plugin_discovery_keeps_registry_entries_outside_install_root() {
+        let config_home = temp_dir("registry-fallback-home");
+        let bundled_root = temp_dir("registry-fallback-bundled");
+        let install_root = config_home.join("plugins").join("installed");
+        let external_install_path = temp_dir("registry-fallback-external");
+        write_file(
+            external_install_path.join(MANIFEST_FILE_NAME).as_path(),
+            r#"{
+  "name": "registry-fallback",
+  "version": "1.0.0",
+  "description": "Registry fallback plugin"
+}"#,
+        );
+
+        let mut config = PluginManagerConfig::new(&config_home);
+        config.bundled_root = Some(bundled_root.clone());
+        config.install_root = Some(install_root.clone());
+        let manager = PluginManager::new(config);
+
+        let mut registry = InstalledPluginRegistry::default();
+        registry.plugins.insert(
+            "registry-fallback@external".to_string(),
+            InstalledPluginRecord {
+                kind: PluginKind::External,
+                id: "registry-fallback@external".to_string(),
+                name: "registry-fallback".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Registry fallback plugin".to_string(),
+                install_path: external_install_path.clone(),
+                source: PluginInstallSource::LocalPath {
+                    path: external_install_path.clone(),
+                },
+                installed_at_unix_ms: 1,
+                updated_at_unix_ms: 1,
+            },
+        );
+        manager.store_registry(&registry).expect("store registry");
+
+        let installed = manager
+            .list_installed_plugins()
+            .expect("registry fallback plugin should load");
+        assert!(installed
+            .iter()
+            .any(|plugin| plugin.metadata.id == "registry-fallback@external"));
+
+        let _ = fs::remove_dir_all(config_home);
+        let _ = fs::remove_dir_all(bundled_root);
+        let _ = fs::remove_dir_all(external_install_path);
     }
 
     #[test]

@@ -136,6 +136,13 @@ impl GlobalToolRegistry {
         &self.entries
     }
 
+    fn find_entry(&self, name: &str) -> Option<&RegisteredTool> {
+        let normalized = normalize_registry_tool_name(name);
+        self.entries.iter().find(|entry| {
+            normalize_registry_tool_name(entry.definition.name.as_str()) == normalized
+        })
+    }
+
     #[must_use]
     pub fn definitions(&self, allowed_tools: Option<&BTreeSet<String>>) -> Vec<ToolDefinition> {
         self.entries
@@ -213,12 +220,10 @@ impl GlobalToolRegistry {
 
     pub fn execute(&self, name: &str, input: &Value) -> Result<String, String> {
         let entry = self
-            .entries
-            .iter()
-            .find(|entry| entry.definition.name == name)
+            .find_entry(name)
             .ok_or_else(|| format!("unsupported tool: {name}"))?;
         match &entry.handler {
-            RegisteredToolHandler::Builtin => execute_tool(name, input),
+            RegisteredToolHandler::Builtin => execute_tool(&entry.definition.name, input),
             RegisteredToolHandler::Plugin(tool) => {
                 tool.execute(input).map_err(|error| error.to_string())
             }
@@ -233,7 +238,44 @@ impl Default for GlobalToolRegistry {
 }
 
 fn normalize_registry_tool_name(value: &str) -> String {
-    value.trim().replace('-', "_").to_ascii_lowercase()
+    let trimmed = value.trim();
+    let chars = trimmed.chars().collect::<Vec<_>>();
+    let mut normalized = String::new();
+
+    for (index, ch) in chars.iter().copied().enumerate() {
+        if matches!(ch, '-' | ' ' | '\t' | '\n') {
+            if !normalized.ends_with('_') {
+                normalized.push('_');
+            }
+            continue;
+        }
+
+        if ch == '_' {
+            if !normalized.ends_with('_') {
+                normalized.push('_');
+            }
+            continue;
+        }
+
+        if ch.is_uppercase() {
+            let prev = chars.get(index.wrapping_sub(1)).copied();
+            let next = chars.get(index + 1).copied();
+            let needs_separator = index > 0
+                && !normalized.ends_with('_')
+                && (prev.is_some_and(|prev| prev.is_lowercase() || prev.is_ascii_digit())
+                    || (prev.is_some_and(char::is_uppercase)
+                        && next.is_some_and(char::is_lowercase)));
+            if needs_separator {
+                normalized.push('_');
+            }
+            normalized.extend(ch.to_lowercase());
+            continue;
+        }
+
+        normalized.push(ch.to_ascii_lowercase());
+    }
+
+    normalized.trim_matches('_').to_string()
 }
 
 fn permission_mode_from_plugin_tool(value: &str) -> Result<PermissionMode, String> {
@@ -3201,6 +3243,59 @@ mod tests {
         assert_eq!(payload["plugin"], "demo@external");
         assert_eq!(payload["tool"], "plugin_echo");
         assert_eq!(payload["input"]["message"], "hello");
+
+        let _ = std::fs::remove_file(script);
+    }
+
+    #[test]
+    fn global_registry_normalizes_plugin_tool_names_for_allowlists_and_execution() {
+        let script = temp_path("plugin-tool-normalized.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nINPUT=$(cat)\nprintf '{\"tool\":\"%s\",\"input\":%s}\\n' \"$CLAWD_TOOL_NAME\" \"$INPUT\"\n",
+        )
+        .expect("write script");
+        make_executable(&script);
+
+        let registry = GlobalToolRegistry::with_plugin_tools(vec![PluginTool::new(
+            "demo@external",
+            "demo",
+            PluginToolDefinition {
+                name: "plugin_echo".to_string(),
+                description: Some("Echo plugin input".to_string()),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "message": { "type": "string" } },
+                    "required": ["message"],
+                    "additionalProperties": false
+                }),
+            },
+            script.display().to_string(),
+            Vec::new(),
+            PluginToolPermission::WorkspaceWrite,
+            script.parent().map(PathBuf::from),
+        )])
+        .expect("registry should build");
+
+        let allowed = registry
+            .normalize_allowed_tools(&[String::from("PLUGIN-ECHO")])
+            .expect("plugin tool allowlist should normalize")
+            .expect("allowlist should be present");
+        assert!(allowed.contains("plugin_echo"));
+
+        let output = registry
+            .execute("plugin-echo", &json!({ "message": "hello" }))
+            .expect("normalized plugin tool name should execute");
+        let payload: serde_json::Value = serde_json::from_str(&output).expect("valid json");
+        assert_eq!(payload["tool"], "plugin_echo");
+        assert_eq!(payload["input"]["message"], "hello");
+
+        let builtin_output = GlobalToolRegistry::builtin()
+            .execute("structured-output", &json!({ "ok": true }))
+            .expect("normalized builtin tool name should execute");
+        let builtin_payload: serde_json::Value =
+            serde_json::from_str(&builtin_output).expect("valid json");
+        assert_eq!(builtin_payload["structured_output"]["ok"], true);
 
         let _ = std::fs::remove_file(script);
     }
