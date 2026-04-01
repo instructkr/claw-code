@@ -33,6 +33,38 @@
 
 ---
 
+## Built with oh-my-opencode
+
+<p align="center">
+  <a href="https://github.com/code-yeongyu/oh-my-openagent">
+    <img src="https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/dev/.github/assets/omo.png" width="600" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/code-yeongyu/oh-my-openagent"><strong>oh-my-opencode</strong></a> — the agent orchestration layer that makes AI coding actually work.
+  <br />
+  <em>Sisyphus doesn't stop until the task is done. Every test passes. Every review clears.</em>
+</p>
+
+<p align="center">
+  <a href="https://github.com/code-yeongyu/oh-my-openagent"><img src="https://img.shields.io/github/stars/code-yeongyu/oh-my-openagent?color=ffcb47&labelColor=black&style=for-the-badge&logo=github" /></a>
+  <a href="https://www.npmjs.com/package/oh-my-opencode"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fohmyopenagent.com%2Fapi%2Fnpm-downloads&style=for-the-badge" /></a>
+  <a href="https://discord.gg/PUwSMR9XNk"><img src="https://img.shields.io/discord/1452487457085063218?color=5865F2&label=discord&labelColor=black&logo=discord&logoColor=white&style=for-the-badge" /></a>
+</p>
+
+The **entire Rust port** was built by oh-my-opencode's **Sisyphus** agent in `ultrawork` mode.
+
+> *"If Claude Code does in 7 days what a human does in 3 months, Sisyphus does it in 1 hour."* — B, Quant Researcher
+
+> *"Oh My OpenCode Is Actually Insane"* — [YouTube - Darren Builds AI](https://www.youtube.com/watch?v=G_Snfh2M41M)
+
+**Credits:** [@code-yeongyu](https://github.com/code-yeongyu) (oh-my-opencode creator) · **Sisyphus** (autonomous coding agent) · **Jobdori** ([OpenClaw](https://github.com/openclaw/openclaw))
+
+<p align="center"><code>npx oh-my-opencode@latest</code></p>
+
+---
+
 ## Rust Port
 
 The Rust workspace under `rust/` is the current systems-language port of the project.
@@ -62,7 +94,7 @@ The whole thing was orchestrated end-to-end using [oh-my-codex (OmX)](https://gi
 
 The result is a clean-room Python rewrite that captures the architectural patterns of Claw Code's agent harness without copying any proprietary source. I'm now actively collaborating with [@bellman_ych](https://x.com/bellman_ych) — the creator of OmX himself — to push this further. The basic Python foundation is already in place and functional, but we're just getting started. **Stay tuned — a much more capable version is on the way.**
 
-The Rust port was scaffolded and architected with [oh-my-codex (OmX)](https://github.com/Yeachan-Heo/oh-my-codex). [oh-my-opencode (OmO)](https://github.com/instructkr/oh-my-opencode) was also used as a supporting implementation tool during later execution and verification passes.
+The Rust port was built separately using [oh-my-opencode (OMO)](https://github.com/code-yeongyu/oh-my-opencode) by [@q_yeon_gyu_kim](https://x.com/q_yeon_gyu_kim) ([@code-yeongyu](https://github.com/code-yeongyu)), which orchestrates [opencode](https://opencode.ai) agents. **The scaffolding and architecture direction were established with [oh-my-codex (OmX)](https://github.com/Yeachan-Heo/oh-my-codex),** and the **Sisyphus** agent then handled implementation work across the API client, runtime engine, CLI, plugin system, MCP integration, and the cleanroom pass in `ultrawork` mode.
 
 https://github.com/instructkr/claw-code
 
@@ -188,8 +220,8 @@ The port now mirrors the archived root-entry file surface, top-level subsystem n
 
 This repository's porting, cleanroom hardening, and verification workflow was AI-assisted with Yeachan Heo's tooling stack, with **oh-my-codex (OmX)** as the primary scaffolding and orchestration layer.
 
-- [**oh-my-codex (OmX)**](https://github.com/Yeachan-Heo/oh-my-codex) — primary scaffolding, orchestration, architecture direction, and core porting workflow
-- [**oh-my-opencode (OmO)**](https://github.com/instructkr/oh-my-opencode) — secondary implementation and verification support
+- [**oh-my-codex (OmX)**](https://github.com/Yeachan-Heo/oh-my-codex) — main branch credit: primary scaffolding, orchestration, and core porting workflow
+- [**oh-my-opencode (OmO)**](https://github.com/instructkr/oh-my-opencode) — implementation acceleration, cleanup passes, and verification support
 
 Key workflow patterns used during the port:
 
