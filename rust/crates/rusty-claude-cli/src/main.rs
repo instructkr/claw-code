@@ -22,8 +22,8 @@ use api::{
 };
 
 use commands::{
-    handle_plugins_slash_command, render_slash_command_help, resume_supported_slash_commands,
-    slash_command_specs, SlashCommand,
+    handle_agents_slash_command, handle_plugins_slash_command, handle_skills_slash_command,
+    render_slash_command_help, resume_supported_slash_commands, slash_command_specs, SlashCommand,
 };
 use compat_harness::{extract_manifest, UpstreamPaths};
 use init::initialize_repo;
@@ -903,6 +903,8 @@ fn run_resume_command(
         | SlashCommand::Permissions { .. }
         | SlashCommand::Session { .. }
         | SlashCommand::Plugins { .. }
+        | SlashCommand::Agents { .. }
+        | SlashCommand::Skills { .. }
         | SlashCommand::Unknown(_) => Err("unsupported resumed slash command".into()),
     }
 }
@@ -1197,6 +1199,14 @@ impl LiveCli {
             SlashCommand::Plugins { action, target } => {
                 self.handle_plugins_command(action.as_deref(), target.as_deref())?
             }
+            SlashCommand::Agents { args } => {
+                Self::print_agents(args.as_deref())?;
+                false
+            }
+            SlashCommand::Skills { args } => {
+                Self::print_skills(args.as_deref())?;
+                false
+            }
             SlashCommand::Unknown(name) => {
                 eprintln!("unknown slash command: /{name}");
                 false
@@ -1394,6 +1404,18 @@ impl LiveCli {
 
     fn print_memory() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", render_memory_report()?);
+        Ok(())
+    }
+
+    fn print_agents(args: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        let cwd = env::current_dir()?;
+        println!("{}", handle_agents_slash_command(args, &cwd)?);
+        Ok(())
+    }
+
+    fn print_skills(args: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        let cwd = env::current_dir()?;
+        println!("{}", handle_skills_slash_command(args, &cwd)?);
         Ok(())
     }
 
@@ -2734,6 +2756,7 @@ fn describe_tool_progress(name: &str, input: &str) -> String {
 }
 
 #[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::too_many_arguments)]
 fn build_runtime(
     session: Session,
     model: String,
@@ -3058,7 +3081,12 @@ fn collect_tool_results(summary: &runtime::TurnSummary) -> Vec<serde_json::Value
 fn slash_command_completion_candidates() -> Vec<String> {
     slash_command_specs()
         .iter()
-        .map(|spec| format!("/{}", spec.name))
+        .flat_map(|spec| {
+            std::iter::once(spec.name)
+                .chain(spec.aliases.iter().copied())
+                .map(|name| format!("/{name}"))
+                .collect::<Vec<_>>()
+        })
         .collect()
 }
 
@@ -4062,8 +4090,11 @@ mod tests {
         assert!(help.contains("/export [file]"));
         assert!(help.contains("/session [list|switch <session-id>]"));
         assert!(help.contains(
-            "/plugins [list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]"
+            "/plugin [list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]"
         ));
+        assert!(help.contains("aliases: /plugins, /marketplace"));
+        assert!(help.contains("/agents"));
+        assert!(help.contains("/skills"));
         assert!(help.contains("/exit"));
     }
 

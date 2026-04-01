@@ -721,11 +721,10 @@ fn load_agents_from_roots(
                 continue;
             }
             let contents = fs::read_to_string(entry.path())?;
-            let fallback_name = entry
-                .path()
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().to_string())
-                .unwrap_or_else(|| entry.file_name().to_string_lossy().to_string());
+            let fallback_name = entry.path().file_stem().map_or_else(
+                || entry.file_name().to_string_lossy().to_string(),
+                |stem| stem.to_string_lossy().to_string(),
+            );
             root_agents.push(AgentSummary {
                 name: parse_toml_string(&contents, "name").unwrap_or(fallback_name),
                 description: parse_toml_string(&contents, "description"),
@@ -1227,9 +1226,12 @@ mod tests {
         assert!(help.contains("/export [file]"));
         assert!(help.contains("/session [list|switch <session-id>]"));
         assert!(help.contains(
-            "/plugins [list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]"
+            "/plugin [list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]"
         ));
-        assert_eq!(slash_command_specs().len(), 23);
+        assert!(help.contains("aliases: /plugins, /marketplace"));
+        assert!(help.contains("/agents"));
+        assert!(help.contains("/skills"));
+        assert_eq!(slash_command_specs().len(), 25);
         assert_eq!(resume_supported_slash_commands().len(), 11);
     }
 
