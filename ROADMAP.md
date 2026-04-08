@@ -194,6 +194,20 @@ Workers should distinguish:
 Acceptance:
 - no more ambiguous "tests passed" messaging
 - merge policy can require the correct green level for the lane type
+- a single hung test must not mask other failures: enforce per-test
+  timeouts in CI (`cargo test --workspace`) so a 6-minute hang in one
+  crate cannot prevent downstream crates from running their suites
+- when a CI job fails because of a hang, the worker must report it as
+  `test.hung` rather than a generic failure, so triage doesn't conflate
+  it with a normal `assertion failed`
+- recorded pinpoint (2026-04-08): `be561bf` swapped the local
+  byte-estimate preflight for a `count_tokens` round-trip and silently
+  returned `Ok(())` on any error, so `send_message_blocks_oversized_*`
+  hung for ~6 minutes per attempt; the resulting workspace job crash
+  hid 6 *separate* pre-existing CLI regressions (compact flag
+  discarded, piped stdin vs permission prompter, legacy session layout,
+  help/prompt assertions, mock harness count) that only became
+  diagnosable after `8c6dfe5` + `5851f2d` restored the fast-fail path
 
 ## Phase 4 — Claws-First Task Execution
 
