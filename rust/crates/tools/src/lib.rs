@@ -105,6 +105,16 @@ pub struct ToolSpec {
     pub required_permission: PermissionMode,
 }
 
+pub const IMAGE_QUALITY_TOOL_NAMES: &[&str] = &[
+    "generate_image",
+    "detect_hands_feet",
+    "check_symmetry",
+    "check_pattern_consistency",
+    "inpaint_region",
+    "ImageQualityGate",
+    "ImageQualityLoopPlan",
+];
+
 #[derive(Debug, Clone)]
 pub struct GlobalToolRegistry {
     plugin_tools: Vec<PluginTool>,
@@ -229,6 +239,12 @@ impl GlobalToolRegistry {
                 .split(|ch: char| ch == ',' || ch.is_whitespace())
                 .filter(|token| !token.is_empty())
             {
+                if normalize_tool_name(token) == "image_only" {
+                    for image_tool in IMAGE_QUALITY_TOOL_NAMES {
+                        allowed.insert((*image_tool).to_string());
+                    }
+                    continue;
+                }
                 let normalized = normalize_tool_name(token);
                 let canonical = name_map.get(&normalized).ok_or_else(|| {
                     format!(
@@ -365,6 +381,18 @@ impl GlobalToolRegistry {
         });
         builtin.chain(runtime).chain(plugin).collect()
     }
+}
+
+#[must_use]
+pub fn image_quality_tool_specs() -> Vec<ToolSpec> {
+    let names = IMAGE_QUALITY_TOOL_NAMES
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    mvp_tool_specs()
+        .into_iter()
+        .filter(|spec| names.contains(spec.name))
+        .collect()
 }
 
 fn normalize_tool_name(value: &str) -> String {
@@ -1295,6 +1323,25 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "ImageQualityLoopPlan",
+            description: "Plan next action for iterative image repair (accept, repair, or reject) with targeted prompts.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "iteration": { "type": "integer", "minimum": 0 },
+                    "max_iterations": { "type": "integer", "minimum": 1 },
+                    "gate_passed": { "type": "boolean" },
+                    "anatomy_issues": { "type": "array", "items": { "type": "string" } },
+                    "symmetry_violations": { "type": "array", "items": { "type": "string" } },
+                    "pattern_violations": { "type": "array", "items": { "type": "string" } },
+                    "artifact_issues": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["iteration", "max_iterations", "gate_passed"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
             name: "MCP",
             description: "Execute a tool provided by a connected MCP server.",
             input_schema: json!({
@@ -1446,6 +1493,9 @@ fn execute_tool_with_enforcer(
         "inpaint_region" => from_value::<InpaintRegionInput>(input).and_then(run_inpaint_region),
         "ImageQualityGate" => {
             from_value::<ImageQualityGateInput>(input).and_then(run_image_quality_gate)
+        }
+        "ImageQualityLoopPlan" => {
+            from_value::<ImageQualityLoopPlanInput>(input).and_then(run_image_quality_loop_plan)
         }
         "MCP" => from_value::<McpToolInput>(input).and_then(run_mcp_tool),
         "TestingPermission" => {
@@ -2088,6 +2138,72 @@ fn run_image_quality_gate(input: ImageQualityGateInput) -> Result<String, String
             "artifact_score": 0.85,
             "weighted_total": 0.90
         }
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_image_quality_loop_plan(input: ImageQualityLoopPlanInput) -> Result<String, String> {
+    if input.gate_passed {
+        return to_pretty_json(json!({
+            "action": "accept",
+            "reason": "quality gate passed",
+            "iteration": input.iteration
+        }));
+    }
+
+    if input.iteration >= input.max_iterations {
+        return to_pretty_json(json!({
+            "action": "reject",
+            "reason": "max iterations reached without passing gate",
+            "iteration": input.iteration,
+            "max_iterations": input.max_iterations
+        }));
+    }
+
+    let mut repairs = Vec::new();
+    if !input.anatomy_issues.is_empty() {
+        repairs.push(json!({
+            "type": "anatomy",
+            "priority": 1,
+            "issues": input.anatomy_issues,
+            "positive_prompt": "anatomically correct hand and foot structure, natural joints, proper digit separation",
+            "negative_prompt": "extra digits, fused fingers, malformed toes, deformed joints"
+        }));
+    }
+    if !input.symmetry_violations.is_empty() {
+        repairs.push(json!({
+            "type": "symmetry",
+            "priority": 2,
+            "issues": input.symmetry_violations,
+            "positive_prompt": "left and right sides mirror-consistent in design, trim, and stitching",
+            "negative_prompt": "asymmetrical clothing details, mismatched mirrored elements"
+        }));
+    }
+    if !input.pattern_violations.is_empty() {
+        repairs.push(json!({
+            "type": "pattern",
+            "priority": 3,
+            "issues": input.pattern_violations,
+            "positive_prompt": "continuous repeating motif with stable scale and orientation",
+            "negative_prompt": "broken repeats, warped motif scale, seam discontinuity"
+        }));
+    }
+    if !input.artifact_issues.is_empty() {
+        repairs.push(json!({
+            "type": "artifact",
+            "priority": 4,
+            "issues": input.artifact_issues,
+            "positive_prompt": "clean detail and coherent edges preserving original style",
+            "negative_prompt": "smudging, ringing artifacts, over-sharpened halos"
+        }));
+    }
+
+    to_pretty_json(json!({
+        "action": "repair",
+        "iteration": input.iteration,
+        "next_iteration": input.iteration + 1,
+        "repairs": repairs,
+        "repair_count": repairs.len()
     }))
 }
 
@@ -2914,6 +3030,21 @@ struct ImageQualityGateInput {
     require_symmetry: Option<bool>,
     #[serde(default)]
     require_pattern: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ImageQualityLoopPlanInput {
+    iteration: u32,
+    max_iterations: u32,
+    gate_passed: bool,
+    #[serde(default)]
+    anatomy_issues: Vec<String>,
+    #[serde(default)]
+    symmetry_violations: Vec<String>,
+    #[serde(default)]
+    pattern_violations: Vec<String>,
+    #[serde(default)]
+    artifact_issues: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6684,6 +6815,41 @@ mod tests {
     }
 
     #[test]
+    fn image_quality_loop_plan_accepts_when_gate_passes() {
+        let output = execute_tool(
+            "ImageQualityLoopPlan",
+            &json!({
+                "iteration": 1,
+                "max_iterations": 4,
+                "gate_passed": true
+            }),
+        )
+        .expect("loop planner should evaluate");
+        let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid json");
+        assert_eq!(parsed["action"], "accept");
+    }
+
+    #[test]
+    fn image_quality_loop_plan_returns_repair_plan_when_gate_fails() {
+        let output = execute_tool(
+            "ImageQualityLoopPlan",
+            &json!({
+                "iteration": 1,
+                "max_iterations": 4,
+                "gate_passed": false,
+                "anatomy_issues": ["extra_digits"],
+                "symmetry_violations": ["left-right mismatch"],
+                "pattern_violations": ["broken_repeat"]
+            }),
+        )
+        .expect("loop planner should evaluate");
+        let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid json");
+        assert_eq!(parsed["action"], "repair");
+        assert_eq!(parsed["repair_count"], 3);
+        assert_eq!(parsed["repairs"][0]["type"], "anatomy");
+    }
+
+    #[test]
     fn worker_tools_gate_prompt_delivery_until_ready_and_support_auto_trust() {
         let created = execute_tool(
             "WorkerCreate",
@@ -7387,6 +7553,29 @@ mod tests {
             output["mcp_degraded"]["failed_servers"][0]["phase"],
             "tool_discovery"
         );
+    }
+
+    #[test]
+    fn image_only_allowed_tools_alias_expands_to_image_toolset() {
+        let registry = GlobalToolRegistry::builtin();
+        let allowed = registry
+            .normalize_allowed_tools(&["image_only".to_string()])
+            .expect("image_only alias should be accepted")
+            .expect("allow list should be returned");
+        for tool_name in super::IMAGE_QUALITY_TOOL_NAMES {
+            assert!(allowed.contains(*tool_name), "missing {tool_name}");
+        }
+    }
+
+    #[test]
+    fn image_quality_tool_specs_returns_only_image_tools() {
+        let specs = super::image_quality_tool_specs();
+        let names = specs.iter().map(|spec| spec.name).collect::<BTreeSet<_>>();
+        let expected = super::IMAGE_QUALITY_TOOL_NAMES
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(names, expected);
     }
 
     #[test]
