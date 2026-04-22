@@ -459,6 +459,113 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         },
+        // #251: session-management verbs (list-sessions, load-session,
+        // delete-session, flush-transcript) are pure-local operations.
+        // They are intercepted at the parser level and dispatched directly
+        // to session-control operations without requiring credentials.
+        CliAction::ListSessions { output_format } => {
+            use runtime::session_control::list_managed_sessions_for;
+            let base_dir = env::current_dir()?;
+            let sessions = list_managed_sessions_for(base_dir)?;
+            match output_format {
+                CliOutputFormat::Text => {
+                    if sessions.is_empty() {
+                        println!("No sessions found.");
+                    } else {
+                        for session in sessions {
+                            println!("{} ({})", session.id, session.path.display());
+                        }
+                    }
+                }
+                CliOutputFormat::Json => {
+                    // #251: ManagedSessionSummary doesn't impl Serialize;
+                    // construct JSON manually with the public fields.
+                    let sessions_json: Vec<serde_json::Value> = sessions
+                        .iter()
+                        .map(|s| {
+                            serde_json::json!({
+                                "id": s.id,
+                                "path": s.path.display().to_string(),
+                                "updated_at_ms": s.updated_at_ms,
+                                "message_count": s.message_count,
+                            })
+                        })
+                        .collect();
+                    let result = serde_json::json!({
+                        "command": "list-sessions",
+                        "sessions": sessions_json,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                }
+            }
+        }
+        CliAction::LoadSession {
+            session_reference,
+            output_format,
+        } => {
+            use runtime::session_control::load_managed_session_for;
+            let base_dir = env::current_dir()?;
+            let loaded = load_managed_session_for(base_dir, &session_reference)?;
+            match output_format {
+                CliOutputFormat::Text => {
+                    println!(
+                        "Session {} loaded\n  File       {}\n  Messages   {}",
+                        loaded.session.session_id,
+                        loaded.handle.path.display(),
+                        loaded.session.messages.len()
+                    );
+                }
+                CliOutputFormat::Json => {
+                    let result = serde_json::json!({
+                        "command": "load-session",
+                        "session": {
+                            "id": loaded.session.session_id,
+                            "path": loaded.handle.path.display().to_string(),
+                            "messages": loaded.session.messages.len(),
+                        },
+                    });
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                }
+            }
+        }
+        CliAction::DeleteSession {
+            session_id: _,
+            output_format,
+        } => {
+            // #251: delete-session implementation deferred
+            eprintln!("delete-session is not yet implemented.");
+            if matches!(output_format, CliOutputFormat::Json) {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "type": "error",
+                        "error": "not_yet_implemented",
+                        "command": "delete-session",
+                        "kind": "not_yet_implemented",
+                    })
+                );
+            }
+            std::process::exit(1);
+        }
+        CliAction::FlushTranscript {
+            session_id: _,
+            output_format,
+        } => {
+            // #251: flush-transcript implementation deferred
+            eprintln!("flush-transcript is not yet implemented.");
+            if matches!(output_format, CliOutputFormat::Json) {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "type": "error",
+                        "error": "not_yet_implemented",
+                        "command": "flush-transcript",
+                        "kind": "not_yet_implemented",
+                    })
+                );
+            }
+            std::process::exit(1);
+        }
         CliAction::Export {
             session_reference,
             output_path,
@@ -585,6 +692,26 @@ enum CliAction {
     HelpTopic(LocalHelpTopic),
     // prompt-mode formatting is only supported for non-interactive runs
     Help {
+        output_format: CliOutputFormat,
+    },
+    // #251: session-management verbs are pure-local reads/mutations on the
+    // session store. They do not require credentials or a model connection.
+    // Previously these fell through to the `_other => Prompt` catchall and
+    // emitted `missing_credentials` errors. Now they are intercepted at the
+    // top-level parser and dispatched to session-control operations.
+    ListSessions {
+        output_format: CliOutputFormat,
+    },
+    LoadSession {
+        session_reference: String,
+        output_format: CliOutputFormat,
+    },
+    DeleteSession {
+        session_id: String,
+        output_format: CliOutputFormat,
+    },
+    FlushTranscript {
+        session_id: String,
         output_format: CliOutputFormat,
     },
 }
@@ -940,6 +1067,81 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 ));
             }
             Ok(CliAction::Diff { output_format })
+        }
+        // #251: session-management verbs are pure-local operations on the
+        // session store. They require no credentials or model connection.
+        // Previously they fell through to `_other => Prompt` and emitted
+        // `missing_credentials`. Now they are intercepted at parse time and
+        // routed to session-control operations.
+        "list-sessions" => {
+            let tail = &rest[1..];
+            // list-sessions takes no positional arguments; flags are already parsed
+            if !tail.is_empty() {
+                return Err(format!(
+                    "unexpected extra arguments after `claw list-sessions`: {}",
+                    tail.join(" ")
+                ));
+            }
+            Ok(CliAction::ListSessions { output_format })
+        }
+        "load-session" => {
+            let tail = &rest[1..];
+            // load-session requires a session-id (positional) argument
+            let session_ref = tail.first().ok_or_else(|| {
+                "load-session requires a session-id argument (e.g., `claw load-session SESSION.jsonl`)"
+                    .to_string()
+            })?.clone();
+            if tail.len() > 1 {
+                return Err(format!(
+                    "unexpected extra arguments after `claw load-session {session_ref}`: {}",
+                    tail[1..].join(" ")
+                ));
+            }
+            Ok(CliAction::LoadSession {
+                session_reference: session_ref,
+                output_format,
+            })
+        }
+        "delete-session" => {
+            let tail = &rest[1..];
+            // delete-session requires a session-id (positional) argument
+            let session_id = tail.first().ok_or_else(|| {
+                "delete-session requires a session-id argument (e.g., `claw delete-session SESSION_ID`)"
+                    .to_string()
+            })?.clone();
+            if tail.len() > 1 {
+                return Err(format!(
+                    "unexpected extra arguments after `claw delete-session {session_id}`: {}",
+                    tail[1..].join(" ")
+                ));
+            }
+            Ok(CliAction::DeleteSession {
+                session_id,
+                output_format,
+            })
+        }
+        "flush-transcript" => {
+            let tail = &rest[1..];
+            // flush-transcript: optional --session-id flag (parsed above) or as positional
+            let session_id = if tail.is_empty() {
+                // --session-id flag must have been provided
+                return Err(
+                    "flush-transcript requires either --session-id flag or positional argument"
+                        .to_string(),
+                );
+            } else {
+                tail[0].clone()
+            };
+            if tail.len() > 1 {
+                return Err(format!(
+                    "unexpected extra arguments after `claw flush-transcript {session_id}`: {}",
+                    tail[1..].join(" ")
+                ));
+            }
+            Ok(CliAction::FlushTranscript {
+                session_id,
+                output_format,
+            })
         }
         "skills" => {
             let args = join_optional_args(&rest[1..]);
@@ -10294,6 +10496,89 @@ mod tests {
             CliAction::Diff {
                 output_format: CliOutputFormat::Json,
             }
+        );
+        // #251: session-management verbs (list-sessions, load-session,
+        // delete-session, flush-transcript) must be intercepted at top-level
+        // parse and returned as CliAction variants. Previously they fell
+        // through to `_other => Prompt` and emitted `missing_credentials`
+        // for purely-local operations.
+        assert_eq!(
+            parse_args(&["list-sessions".to_string()])
+                .expect("list-sessions should parse"),
+            CliAction::ListSessions {
+                output_format: CliOutputFormat::Text,
+            },
+            "list-sessions must dispatch to ListSessions, not fall through to Prompt"
+        );
+        assert_eq!(
+            parse_args(&[
+                "list-sessions".to_string(),
+                "--output-format".to_string(),
+                "json".to_string(),
+            ])
+            .expect("list-sessions --output-format json should parse"),
+            CliAction::ListSessions {
+                output_format: CliOutputFormat::Json,
+            }
+        );
+        assert_eq!(
+            parse_args(&[
+                "load-session".to_string(),
+                "my-session-id".to_string(),
+            ])
+            .expect("load-session <id> should parse"),
+            CliAction::LoadSession {
+                session_reference: "my-session-id".to_string(),
+                output_format: CliOutputFormat::Text,
+            },
+            "load-session must dispatch to LoadSession, not fall through to Prompt"
+        );
+        assert_eq!(
+            parse_args(&[
+                "delete-session".to_string(),
+                "my-session-id".to_string(),
+            ])
+            .expect("delete-session <id> should parse"),
+            CliAction::DeleteSession {
+                session_id: "my-session-id".to_string(),
+                output_format: CliOutputFormat::Text,
+            },
+            "delete-session must dispatch to DeleteSession, not fall through to Prompt"
+        );
+        assert_eq!(
+            parse_args(&[
+                "flush-transcript".to_string(),
+                "my-session-id".to_string(),
+            ])
+            .expect("flush-transcript <id> should parse"),
+            CliAction::FlushTranscript {
+                session_id: "my-session-id".to_string(),
+                output_format: CliOutputFormat::Text,
+            },
+            "flush-transcript must dispatch to FlushTranscript, not fall through to Prompt"
+        );
+        // #251: required positional arguments for session verbs
+        let load_err = parse_args(&["load-session".to_string()])
+            .expect_err("load-session without id should be rejected");
+        assert!(
+            load_err.contains("load-session requires a session-id"),
+            "missing session-id error should be specific, got: {load_err}"
+        );
+        let delete_err = parse_args(&["delete-session".to_string()])
+            .expect_err("delete-session without id should be rejected");
+        assert!(
+            delete_err.contains("delete-session requires a session-id"),
+            "missing session-id error should be specific, got: {delete_err}"
+        );
+        // #251: extra arguments must be rejected
+        let extra_err = parse_args(&[
+            "list-sessions".to_string(),
+            "unexpected".to_string(),
+        ])
+        .expect_err("list-sessions with extra args should be rejected");
+        assert!(
+            extra_err.contains("unexpected extra arguments"),
+            "extra-args error should be specific, got: {extra_err}"
         );
         // #147: empty / whitespace-only positional args must be rejected
         // with a specific error instead of falling through to the prompt
