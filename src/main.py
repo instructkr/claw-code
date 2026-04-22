@@ -203,9 +203,59 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _emit_parse_error_envelope(argv: list[str], message: str) -> None:
+    """#178: emit JSON envelope for argparse-level errors when --output-format json is requested.
+
+    Pre-scans argv for --output-format json. If found, prints a parse-error envelope
+    to stdout (per SCHEMAS.md 'error' envelope shape) instead of letting argparse
+    dump help text to stderr. This preserves the JSON contract for claws that can't
+    parse argparse usage messages.
+    """
+    import json
+    # Extract the attempted command (argv[0] is the first positional)
+    attempted = argv[0] if argv and not argv[0].startswith('-') else '<missing>'
+    envelope = wrap_json_envelope(
+        {
+            'error': {
+                'kind': 'parse',
+                'operation': 'argparse',
+                'target': attempted,
+                'retryable': False,
+                'message': message,
+                'hint': 'run with no arguments to see available subcommands',
+            },
+        },
+        command=attempted,
+        exit_code=1,
+    )
+    print(json.dumps(envelope))
+
+
+def _wants_json_output(argv: list[str]) -> bool:
+    """#178: check if argv contains --output-format json anywhere (for parse-error routing)."""
+    for i, arg in enumerate(argv):
+        if arg == '--output-format' and i + 1 < len(argv) and argv[i + 1] == 'json':
+            return True
+        if arg == '--output-format=json':
+            return True
+    return False
+
+
 def main(argv: list[str] | None = None) -> int:
+    import sys
+    if argv is None:
+        argv = sys.argv[1:]
     parser = build_parser()
-    args = parser.parse_args(argv)
+    # #178: catch argparse errors and emit JSON envelope when --output-format json present
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        # argparse exits with SystemExit on error (code 2) or --help (code 0)
+        if exc.code != 0 and _wants_json_output(argv):
+            # Reconstruct a generic parse-error message
+            _emit_parse_error_envelope(argv, 'invalid command or argument (argparse rejection)')
+            return 1
+        raise
     manifest = build_port_manifest()
     if args.command == 'summary':
         print(QueryEnginePort(manifest).render_summary())
