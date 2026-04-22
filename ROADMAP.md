@@ -6294,3 +6294,88 @@ with patch.object(QueryEnginePort, 'submit_message', hang_and_mutate):
 **Blocker.** Python threading does not expose preemptive cancellation, so purely CPU-bound stalls inside `_format_output` or provider client libraries cannot be force-killed. The fix makes cancellation *cooperative*, not *guaranteed*. Eventually the engine will need an `asyncio`-native path with `asyncio.Task.cancel()` for real provider IO, but that is a larger refactor.
 
 **Source.** Jobdori dogfood sweep 2026-04-22 17:36 KST — filed while landing #162, following review feedback on #161 that pointed out the caller-facing timeout and underlying work-cancellation are two different problems. #161 closed the first; #164 is the second.
+
+## Pinpoint #165. `claw load-session` lacks the `--directory` / `--output-format` / JSON-error parity that #160 established for `list-sessions` and `delete-session` — session-lifecycle CLI triplet is asymmetric
+
+**Gap.** The #160 session-lifecycle surface is three commands: `list-sessions`, `delete-session`, `load-session`. The first two accept `--directory DIR` and `--output-format {text,json}`, and emit a typed JSON error envelope (`{session_id, deleted, error: {kind, message, retryable}}`) on failure. `load-session` accepts neither flag and, on a missing session, dumps a **raw Python traceback** to stderr that includes the internal exception class name:
+
+```
+$ claw load-session nonexistent
+Traceback (most recent call last):
+  File "/.../src/main.py", line 324, in <module>
+    raise SystemExit(main())
+  File "/.../src/main.py", line 230, in main
+    session = load_session(args.session_id)
+  File "/.../src/session_store.py", line 32, in load_session
+    raise SessionNotFoundError(f'session {session_id!r} not found in {target_dir}') from None
+src.session_store.SessionNotFoundError: "session 'nonexistent' not found in .port_sessions"
+$ echo $?
+1
+```
+
+**Impact.** Three concrete breakages:
+
+1. **Alternate session-store locations are unreachable via `load-session`.** Claws that keep sessions in `/tmp/claw-run-XXX/.port_sessions` can `list-sessions --directory /tmp/.../port_sessions` and `delete-session id --directory /tmp/.../port_sessions`, but they cannot `load-session id --directory /tmp/.../port_sessions`. The load path is hardcoded to `.port_sessions` in CWD. This breaks any orchestration that runs out-of-tree.
+
+2. **Not-found is a traceback, not an envelope.** Claws parsing `load-session` output to decide "retry vs escalate vs give up" see a multi-line Python stack instead of a `{error: {kind: "session_not_found", ...}}` structure. The exit code (1) is the only machine-readable signal, which collapses every load failure into a single bucket.
+
+3. **Leaked internal class name creates parsing coupling.** The traceback contains `src.session_store.SessionNotFoundError` verbatim. If we ever rename the class, version-pinned claws that grep for it break. That's accidental API surface.
+
+**Repro (the #160 triplet side-by-side).**
+```bash
+# list-sessions: structured + parameterised  
+$ claw list-sessions --directory /tmp/never-created --output-format json
+{"sessions": [], "count": 0}
+
+# delete-session: structured + parameterised + typed error on partial failure
+$ claw delete-session nonexistent --directory /tmp/never-created --output-format json
+{"session_id": "nonexistent", "deleted": false, "status": "not_found"}
+
+# load-session: neither + raw traceback
+$ claw load-session nonexistent --directory /tmp/never-created
+error: unrecognized arguments: --directory /tmp/never-created
+
+$ claw load-session nonexistent
+Traceback (most recent call last):
+  ...
+src.session_store.SessionNotFoundError: "session 'nonexistent' not found in .port_sessions"
+```
+
+**Fix shape (~30 lines).**
+1. Add `--directory DIR` to `load-session` argparse (forward to `load_session(args.session_id, directory)`).
+2. Add `--output-format {text,json}` to `load-session` argparse.
+3. Catch `SessionNotFoundError` in the handler and emit a typed error envelope that mirrors the `delete-session` shape:
+   ```json
+   {
+     "session_id": "nonexistent",
+     "loaded": false,
+     "error": {
+       "kind": "session_not_found",
+       "message": "session 'nonexistent' not found in /path/to/dir",
+       "directory": "/path/to/dir",
+       "retryable": false
+     }
+   }
+   ```
+   `retryable: false` is the right default here: not-found doesn't resolve itself on retry (unlike `delete-session` partial-failure which might). Claws know to stop vs retry from this flag alone.
+4. Exit code contract: 0 on successful load, 1 on not-found (preserves current `$?`), still 1 on unexpected `OSError`/`JSONDecodeError` with a distinct `kind` so callers can distinguish "no such session" from "session file corrupted".
+5. Success path JSON shape:
+   ```json
+   {
+     "session_id": "alpha",
+     "loaded": true,
+     "messages_count": 3,
+     "input_tokens": 42,
+     "output_tokens": 99
+   }
+   ```
+   Mirrors what text mode already prints but as parseable data.
+
+**Acceptance.** All three of these pass:
+- `claw load-session ID --directory /some/other/dir` succeeds on a session in that dir (parity with list/delete)
+- `claw load-session nonexistent --output-format json` exits 1 with `{session_id, loaded: false, error: {kind: "session_not_found", ...}}` — no traceback, no class name leak
+- Existing `claw load-session ID` text-mode output unchanged for backward compat
+
+**Blocker.** None. Purely CLI-layer wiring; `session_store.load_session` already accepts `directory` and already raises the typed `SessionNotFoundError`. This is closing the gap between the library contract (which is clean) and the CLI contract (which isn't).
+
+**Source.** Jobdori dogfood sweep 2026-04-22 17:44 KST — ran `claw load-session nonexistent`, got a Python traceback. Compared `--help` across the #160 triplet; confirmed `list-sessions` and `delete-session` both have `--directory` + `--output-format` but `load-session` has neither. The session-lifecycle surface is inconsistent in a way that directly hurts claws that already adopted #160.

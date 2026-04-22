@@ -84,8 +84,20 @@ def build_parser() -> argparse.ArgumentParser:
     flush_parser = subparsers.add_parser('flush-transcript', help='persist and flush a temporary session transcript')
     flush_parser.add_argument('prompt')
 
-    load_session_parser = subparsers.add_parser('load-session', help='load a previously persisted session')
+    load_session_parser = subparsers.add_parser(
+        'load-session',
+        help='load a previously persisted session (#160/#165: claw-native session API)',
+    )
     load_session_parser.add_argument('session_id')
+    load_session_parser.add_argument(
+        '--directory', help='session storage directory (default: .port_sessions)'
+    )
+    load_session_parser.add_argument(
+        '--output-format',
+        choices=['text', 'json'],
+        default='text',
+        help='output format',
+    )
 
     list_sessions_parser = subparsers.add_parser(
         'list-sessions',
@@ -227,8 +239,59 @@ def main(argv: list[str] | None = None) -> int:
         print(f'flushed={engine.transcript_store.flushed}')
         return 0
     if args.command == 'load-session':
-        session = load_session(args.session_id)
-        print(f'{session.session_id}\n{len(session.messages)} messages\nin={session.input_tokens} out={session.output_tokens}')
+        from pathlib import Path as _Path
+        directory = _Path(args.directory) if args.directory else None
+        # #165: catch typed SessionNotFoundError + surface a JSON error envelope
+        # matching the delete-session contract shape. No more raw tracebacks.
+        try:
+            session = load_session(args.session_id, directory)
+        except SessionNotFoundError as exc:
+            if args.output_format == 'json':
+                import json as _json
+                resolved_dir = str(directory) if directory else '.port_sessions'
+                print(_json.dumps({
+                    'session_id': args.session_id,
+                    'loaded': False,
+                    'error': {
+                        'kind': 'session_not_found',
+                        'message': str(exc),
+                        'directory': resolved_dir,
+                        'retryable': False,
+                    },
+                }))
+            else:
+                print(f'error: {exc}')
+            return 1
+        except (OSError, ValueError) as exc:
+            # Corrupted session file, IO error, JSON decode error — distinct
+            # from 'not found'. Callers may retry here (fs glitch).
+            if args.output_format == 'json':
+                import json as _json
+                resolved_dir = str(directory) if directory else '.port_sessions'
+                print(_json.dumps({
+                    'session_id': args.session_id,
+                    'loaded': False,
+                    'error': {
+                        'kind': 'session_load_failed',
+                        'message': str(exc),
+                        'directory': resolved_dir,
+                        'retryable': True,
+                    },
+                }))
+            else:
+                print(f'error: {exc}')
+            return 1
+        if args.output_format == 'json':
+            import json as _json
+            print(_json.dumps({
+                'session_id': session.session_id,
+                'loaded': True,
+                'messages_count': len(session.messages),
+                'input_tokens': session.input_tokens,
+                'output_tokens': session.output_tokens,
+            }))
+        else:
+            print(f'{session.session_id}\n{len(session.messages)} messages\nin={session.input_tokens} out={session.output_tokens}')
         return 0
     if args.command == 'list-sessions':
         from pathlib import Path as _Path
