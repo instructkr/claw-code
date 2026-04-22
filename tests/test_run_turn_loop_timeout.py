@@ -51,7 +51,9 @@ class TestTimeoutAbortsHungTurn:
         """A stalled submit_message must be aborted and emit stop_reason='timeout'."""
         runtime = PortRuntime()
 
-        def _hang(prompt, commands, tools, denials):
+        # #164 Stage A: runtime now passes cancel_event as a 5th positional
+        # arg on the timeout path, so mocks must accept it (even if they ignore it).
+        def _hang(prompt, commands, tools, denials, cancel_event=None):
             time.sleep(5.0)  # would block the loop
             return _completed_result(prompt)
 
@@ -84,7 +86,7 @@ class TestTimeoutBudgetIsTotal:
         runtime = PortRuntime()
         call_count = {'n': 0}
 
-        def _slow(prompt, commands, tools, denials):
+        def _slow(prompt, commands, tools, denials, cancel_event=None):
             call_count['n'] += 1
             time.sleep(0.4)  # each turn burns 0.4s
             return _completed_result(prompt)
@@ -135,7 +137,7 @@ class TestTimeoutResultShape:
         """Synthetic TurnResult on timeout must carry the turn's prompt + routed matches."""
         runtime = PortRuntime()
 
-        def _hang(prompt, commands, tools, denials):
+        def _hang(prompt, commands, tools, denials, cancel_event=None):
             time.sleep(5.0)
             return _completed_result(prompt)
 

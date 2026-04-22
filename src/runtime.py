@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
@@ -209,6 +210,14 @@ class PortRuntime:
         denied_tools = tuple(self._infer_permission_denials(matches))
         results: list[TurnResult] = []
         deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
+        # #164 Stage A: shared cancel_event signals cooperative cancellation
+        # across turns. On timeout we set() it so any still-running
+        # submit_message call (or the next one on the same engine) observes
+        # the cancel at a safe checkpoint and returns stop_reason='cancelled'
+        # without mutating state. This closes the window where a wedged
+        # provider thread could commit a ghost turn after the caller saw
+        # 'timeout'.
+        cancel_event = threading.Event() if deadline is not None else None
 
         # ThreadPoolExecutor is reused across turns so we cancel cleanly on exit.
         executor = ThreadPoolExecutor(max_workers=1) if deadline is not None else None
@@ -229,22 +238,35 @@ class PortRuntime:
                 if deadline is None:
                     # Legacy path: unbounded call, preserves existing behaviour exactly.
                     # #159: pass inferred denied_tools (no longer hardcoded empty tuple)
+                    # #164: cancel_event is None on this path; submit_message skips
+                    # cancellation checks entirely (legacy zero-overhead behaviour).
                     result = engine.submit_message(turn_prompt, command_names, tool_names, denied_tools)
                 else:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
+                        # #164: signal cancel for any in-flight/future submit_message
+                        # calls that share this engine. Safe because nothing has been
+                        # submitted yet this turn.
+                        assert cancel_event is not None
+                        cancel_event.set()
                         results.append(self._build_timeout_result(turn_prompt, command_names, tool_names))
                         break
                     assert executor is not None
                     future = executor.submit(
-                        engine.submit_message, turn_prompt, command_names, tool_names, denied_tools
+                        engine.submit_message, turn_prompt, command_names, tool_names,
+                        denied_tools, cancel_event,
                     )
                     try:
                         result = future.result(timeout=remaining)
                     except FuturesTimeoutError:
-                        # Best-effort cancel; submit_message may still finish in background
-                        # but we never read its output. The engine's own state mutation
-                        # is owned by the engine and not our concern here.
+                        # #164 Stage A: explicitly signal cancel to the still-running
+                        # submit_message thread. The next time it hits a checkpoint
+                        # (entry or post-budget), it returns 'cancelled' without
+                        # mutating state instead of committing a ghost turn. This
+                        # upgrades #161's best-effort future.cancel() (which only
+                        # cancels pre-start futures) to cooperative mid-flight cancel.
+                        assert cancel_event is not None
+                        cancel_event.set()
                         future.cancel()
                         results.append(self._build_timeout_result(turn_prompt, command_names, tool_names))
                         break

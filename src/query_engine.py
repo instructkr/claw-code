@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass, field
 from uuid import uuid4
 
@@ -64,7 +65,59 @@ class QueryEnginePort:
         matched_commands: tuple[str, ...] = (),
         matched_tools: tuple[str, ...] = (),
         denied_tools: tuple[PermissionDenial, ...] = (),
+        cancel_event: threading.Event | None = None,
     ) -> TurnResult:
+        """Submit a prompt and return a TurnResult.
+
+        #164 Stage A: cooperative cancellation via cancel_event.
+
+        The cancel_event argument (added for #164) lets a caller request early
+        termination at a safe point. When set before the pre-mutation commit
+        stage, submit_message returns early with ``stop_reason='cancelled'``
+        and the engine's state (mutable_messages, transcript_store,
+        permission_denials, total_usage) is left **exactly as it was on
+        entry**. This closes the #161 follow-up gap: before this change, a
+        wedged provider thread could finish executing and silently mutate
+        state after the caller had already observed ``stop_reason='timeout'``,
+        giving the session a ghost turn the caller never acknowledged.
+
+        Contract:
+          - cancel_event is None (default) — legacy behaviour, no checks.
+          - cancel_event set **before** budget check — returns 'cancelled'
+            immediately; no output synthesis, no projection, no mutation.
+          - cancel_event set **between** budget check and commit — returns
+            'cancelled' with state intact.
+          - cancel_event set **after** commit — not observable; the turn is
+            already committed and the caller sees 'completed'. Cancellation
+            is a *safe point* mechanism, not preemption. This is the honest
+            limit of cooperative cancellation in Python threading land.
+
+        Stop reason taxonomy after #164 Stage A:
+          - 'completed'            — turn committed, state mutated exactly once
+          - 'max_budget_reached'   — overflow, state unchanged (#162)
+          - 'max_turns_reached'    — capacity exceeded, state unchanged
+          - 'cancelled'            — cancel_event observed, state unchanged
+          - 'timeout'              — synthesised by runtime, not engine (#161)
+
+        Callers that care about deadline-driven cancellation (run_turn_loop)
+        can now request cleanup by setting the event on timeout — the next
+        submit_message on the same engine will observe it at the start and
+        return 'cancelled' without touching state, even if the previous call
+        is still wedged in provider IO.
+        """
+        # #164 Stage A: earliest safe cancellation point. No output synthesis,
+        # no budget projection, no mutation — just an immediate clean return.
+        if cancel_event is not None and cancel_event.is_set():
+            return TurnResult(
+                prompt=prompt,
+                output='',
+                matched_commands=matched_commands,
+                matched_tools=matched_tools,
+                permission_denials=denied_tools,
+                usage=self.total_usage,  # unchanged
+                stop_reason='cancelled',
+            )
+
         if len(self.mutable_messages) >= self.config.max_turns:
             output = f'Max turns reached before processing prompt: {prompt}'
             return TurnResult(
@@ -102,6 +155,21 @@ class QueryEnginePort:
                 permission_denials=denied_tools,
                 usage=self.total_usage,  # unchanged — overflow turn was rejected
                 stop_reason='max_budget_reached',
+            )
+
+        # #164 Stage A: second safe cancellation point. Projection is done
+        # but nothing has been committed yet. If the caller cancelled while
+        # we were building output / computing budget, honour it here — still
+        # no mutation.
+        if cancel_event is not None and cancel_event.is_set():
+            return TurnResult(
+                prompt=prompt,
+                output=output,
+                matched_commands=matched_commands,
+                matched_tools=matched_tools,
+                permission_denials=denied_tools,
+                usage=self.total_usage,  # unchanged
+                stop_reason='cancelled',
             )
 
         self.mutable_messages.append(prompt)
