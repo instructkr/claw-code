@@ -4734,7 +4734,7 @@ ear], /color [scheme], /effort [low|medium|high], /fast, /summary, /tag [label],
 
      **Source.** Jobdori dogfood 2026-04-18 against `/tmp/cdFF2` on main HEAD `b56841c` in response to Clawhip pinpoint nudge at `1495023618529300580`. Joins **Silent-flag / documented-but-unenforced** — section argument silently ignored. Joins **Truth-audit** — help promises section-specific inspection that doesn't exist. Joins **Dispatch-collapse family**: #111 (2-way) + #118 (3-way) + **#126** (4-way). Natural bundle: **#111 + #118 + #126** — dispatch-collapse trio: complete parser-dispatch-collapse audit across slash commands. Session tally: ROADMAP #126.
 
-127. **`claw <subcommand> --json` and `claw <subcommand> <ANY-EXTRA-ARG>` silently fall through to LLM Prompt dispatch — every diagnostic verb (`doctor`, `status`, `sandbox`, `skills`, `version`, `help`) accepts the documented `--output-format json` global only BEFORE the subcommand. The natural shape `claw doctor --json` parses as: subcommand=`doctor` is consumed, then `--json` becomes prompt text, the parser dispatches to `CliAction::Prompt { prompt: "--json" }`, the prompt path demands Anthropic credentials, and a fresh box with no auth fails hard with exit=1. Same for `claw doctor --garbageflag`, `claw doctor garbage args here`, `claw status --json`, `claw skills --json`, etc. The text-mode form `claw doctor` works fine without auth (it's a pure local diagnostic), so this is a pure CLI-surface failure that breaks every observability tool that pipes JSON. README.md says "`claw doctor` should be your first health check" — but any claw, CI step, or monitoring tool that adds `--json` to that exact suggested command gets a credential-required error instead of structured output** — dogfooded 2026-04-20 on main HEAD `7370546` from `/tmp/claw-dogfood` (no `.git`, no `.claw.json`, all `ANTHROPIC_*` / `OPENAI_*` env vars unset via `env -i`).
+127. **[CLOSED 2026-04-20]** **`claw <subcommand> --json` and `claw <subcommand> <ANY-EXTRA-ARG>` silently fall through to LLM Prompt dispatch — every diagnostic verb (`doctor`, `status`, `sandbox`, `skills`, `version`, `help`) accepts the documented `--output-format json` global only BEFORE the subcommand. The natural shape `claw doctor --json` parses as: subcommand=`doctor` is consumed, then `--json` becomes prompt text, the parser dispatches to `CliAction::Prompt { prompt: "--json" }`, the prompt path demands Anthropic credentials, and a fresh box with no auth fails hard with exit=1. Same for `claw doctor --garbageflag`, `claw doctor garbage args here`, `claw status --json`, `claw skills --json`, etc. The text-mode form `claw doctor` works fine without auth (it's a pure local diagnostic), so this is a pure CLI-surface failure that breaks every observability tool that pipes JSON. README.md says "`claw doctor` should be your first health check" — but any claw, CI step, or monitoring tool that adds `--json` to that exact suggested command gets a credential-required error instead of structured output** — dogfooded 2026-04-20 on main HEAD `7370546` from `/tmp/claw-dogfood` (no `.git`, no `.claw.json`, all `ANTHROPIC_*` / `OPENAI_*` env vars unset via `env -i`).
 
      **Concrete repro.**
      ```
@@ -4829,6 +4829,32 @@ ear], /color [scheme], /effort [low|medium|high], /fast, /summary, /tag [label],
      **Blocker.** None. Per-verb post-positional validator + `--json` alias. ~80 lines across `rust/crates/rusty-claude-cli/src/main.rs` and the per-verb dispatch sites.
 
      **Source.** Jobdori dogfood 2026-04-20 against `/tmp/claw-dogfood` (env-cleaned, no git, no config) on main HEAD `7370546` in response to Clawhip pinpoint nudge at `1495620050424434758`. Joins **Silent-flag / documented-but-unenforced** (#96–#101, #104, #108, #111, #115, #116, #117, #118, #119, #121, #122, #123, #124, #126) as 18th — `--json` silently swallowed into Prompt dispatch instead of being recognized or rejected. Joins **Parser-level trust gap quintet** (#108, #117, #119, #122, **#127**) as 5th — same `_other => Prompt` fall-through arm, fifth distinct entry case (#108 = typoed verb, #117 = `-p` greedy, #119 = bare slash + arg, #122 = `--base-commit` greedy, **#127 = valid verb + unrecognized suffix arg**). Joins **Cred-error misdirection / failure-classification gaps** as a sibling of #99 (system-prompt unvalidated) — same family of "local diagnostic verb pretends to need API creds." Joins **Truth-audit / diagnostic-integrity** (#80–#87, #89, #100, #102, #103, #105, #107, #109, #110, #112, #114, #115, #125) — `claw --help` lies about per-verb accepted flags. Joins **Parallel-entry-point asymmetry** (#91, #101, #104, #105, #108, #114, #117, #122, #123, #124) as 11th — three working forms and one broken form for the same logical intent (`--json` doctor output). Joins **Claude Code migration parity** (#103, #109, #116) as 4th — Claude Code's `--json` convention shorthand is unrecognized in claw-code's verb-suffix position; users migrating get cred errors instead. Cross-cluster with **README/USAGE doc-vs-implementation gap** — README explicitly recommends `claw doctor` as the first health check; the natural JSON form of that exact command is broken. Natural bundle: **#108 + #117 + #119 + #122 + #127** — parser-level trust gap quintet: complete `_other => Prompt` fall-through audit (typoed verb + greedy `-p` + bare slash-verb + greedy `--base-commit` + valid verb + unrecognized suffix). Also **#99 + #127** — local-diagnostic cred-error misdirection pair: `system-prompt` and verb-suffix `--json` both pretend to need creds for pure-local operations. Also **#126 + #127** — diagnostic-verb surface integrity pair: `/config` section args ignored (#126) + verb-suffix args silently mis-dispatched (#127). Session tally: ROADMAP #127.
+
+     **Closure (2026-04-20, verified 2026-04-22).** Fixed by two commits on main:
+     - `a3270db fix: #127 reject unrecognized suffix args for diagnostic verbs` — rejects `--json` and other unknown suffix args at parse time rather than falling through to Prompt dispatch
+     - `79352a2 feat: #152 — hint --output-format json when user types --json on diagnostic verbs` — adds "did you mean `--output-format json`?" suggestion
+
+     Re-verified on main HEAD `b903e16` (2026-04-22 cycle #32):
+     ```
+     $ claw doctor --json
+     [error-kind: cli_parse]
+     error: unrecognized argument `--json` for subcommand `doctor`
+     Did you mean `--output-format json`?
+     Run `claw --help` for usage.
+
+     $ claw doctor garbage
+     error: unrecognized argument `garbage` for subcommand `doctor`
+
+     $ claw doctor --unknown-flag
+     error: unrecognized argument `--unknown-flag` for subcommand `doctor`
+
+     $ claw doctor --output-format json
+     { "checks": [...] }   # works as documented canonical form
+     ```
+
+     Stale in-flight branches `feat/jobdori-127-clean` and `feat/jobdori-127-verb-suffix-flags` are **obsolete** — their fix was superseded by `a3270db` + `79352a2` on main. Branches contain an attached large-scope refactor that was never landed. Recommend deletion after closure confirmation.
+
+     Cross-cluster impact post-closure: parser-level trust gap quintet **#108 + #117 + #119 + #122 + #127** now 5/5 closed. `_other => Prompt` fall-through audit complete.
 
 128. **[CLOSED 2026-04-21]** **`claw --model <malformed>` (spaces, empty string, special chars, invalid provider/model syntax) silently falls through to API-layer cred error instead of rejecting at parse time** — dogfooded 2026-04-20 on main HEAD `d284ef7` from a fresh environment (no config, no auth). The `--model` flag accepts any string without syntactic validation: spaces (`claw --model "bad model"`), empty strings (`claw --model ""`), special characters (`claw --model "@invalid"`), non-existent provider/model combinations all parse successfully. The malformed model string then flows into the runtime's provider-detection layer, which silently accepts it as Anthropic fallback or passes it to an API layer that fails with `missing Anthropic credentials` (misdirection) rather than a clear "invalid model syntax" error at parse time. With API credentials configured, a malformed model string gets sent to the API, billing tokens against a request that should have failed client-side.
 
