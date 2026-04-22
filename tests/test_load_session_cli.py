@@ -92,13 +92,17 @@ class TestOutputFormatFlagParity:
         )
         assert result.returncode == 0
         data = json.loads(result.stdout)
-        assert data == {
-            'session_id': 'gamma',
-            'loaded': True,
-            'messages_count': 2,
-            'input_tokens': 5,
-            'output_tokens': 7,
-        }
+        # Verify common envelope fields (SCHEMAS.md contract)
+        assert 'timestamp' in data
+        assert data['command'] == 'load-session'
+        assert data['exit_code'] == 0
+        assert data['schema_version'] == '1.0'
+        # Verify command-specific fields
+        assert data['session_id'] == 'gamma'
+        assert data['loaded'] is True
+        assert data['messages_count'] == 2
+        assert data['input_tokens'] == 5
+        assert data['output_tokens'] == 7
 
     def test_text_mode_unchanged_on_success(self, tmp_path: Path) -> None:
         """Legacy text output must be byte-identical for backward compat."""

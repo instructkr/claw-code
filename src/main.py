@@ -25,6 +25,20 @@ from .tool_pool import assemble_tool_pool
 from .tools import execute_tool, get_tool, get_tools, render_tool_index
 
 
+def wrap_json_envelope(data: dict, command: str, exit_code: int = 0) -> dict:
+    """Wrap command output in canonical JSON envelope per SCHEMAS.md."""
+    from datetime import datetime, timezone
+    now_utc = datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
+    return {
+        'timestamp': now_utc,
+        'command': command,
+        'exit_code': exit_code,
+        'output_format': 'json',
+        'schema_version': '1.0',
+        **data,
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='Python porting workspace for the Claude Code rewrite effort')
     subparsers = parser.add_subparsers(dest='command', required=True)
@@ -212,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
                 'plugin_like': [{'name': m.name, 'source_hint': m.source_hint} for m in graph.plugin_like],
                 'skill_like': [{'name': m.name, 'source_hint': m.source_hint} for m in graph.skill_like],
             }
-            print(json.dumps(envelope))
+            print(json.dumps(wrap_json_envelope(envelope, args.command)))
         else:
             print(graph.as_markdown())
         return 0
@@ -226,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
                 'tool_count': len(pool.tools),
                 'tools': [{'name': t.name, 'source_hint': t.source_hint} for t in pool.tools],
             }
-            print(json.dumps(envelope))
+            print(json.dumps(wrap_json_envelope(envelope, args.command)))
         else:
             print(pool.as_markdown())
         return 0
@@ -235,7 +249,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.output_format == 'json':
             import json
             envelope = {'stages': graph.as_markdown().split('\n'), 'note': 'bootstrap-graph is markdown-only in this version'}
-            print(json.dumps(envelope))
+            print(json.dumps(wrap_json_envelope(envelope, args.command)))
         else:
             print(graph.as_markdown())
         return 0
@@ -281,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
                     for m in matches
                 ],
             }
-            print(json.dumps(envelope))
+            print(json.dumps(wrap_json_envelope(envelope, args.command)))
             return 0
         if not matches:
             print('No mirrored command/tool matches found.')
@@ -321,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:
                 },
                 'persisted_session_path': session.persisted_session_path,
             }
-            print(json.dumps(envelope))
+            print(json.dumps(wrap_json_envelope(envelope, args.command)))
             return 0
         print(session.as_markdown())
         return 0
@@ -355,14 +369,15 @@ def main(argv: list[str] | None = None) -> int:
         path = engine.persist_session(directory)
         if args.output_format == 'json':
             import json as _json
-            print(_json.dumps({
+            _env = {
                 'session_id': engine.session_id,
                 'path': path,
                 'flushed': engine.transcript_store.flushed,
                 'messages_count': len(engine.mutable_messages),
                 'input_tokens': engine.total_usage.input_tokens,
                 'output_tokens': engine.total_usage.output_tokens,
-            }))
+            }
+            print(_json.dumps(wrap_json_envelope(_env, args.command)))
         else:
             # #166: legacy text output preserved byte-for-byte for backward compat.
             print(path)
@@ -379,7 +394,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.output_format == 'json':
                 import json as _json
                 resolved_dir = str(directory) if directory else '.port_sessions'
-                print(_json.dumps({
+                _env = {
                     'session_id': args.session_id,
                     'loaded': False,
                     'error': {
@@ -388,7 +403,8 @@ def main(argv: list[str] | None = None) -> int:
                         'directory': resolved_dir,
                         'retryable': False,
                     },
-                }))
+                }
+                print(_json.dumps(wrap_json_envelope(_env, args.command, exit_code=1)))
             else:
                 print(f'error: {exc}')
             return 1
@@ -398,7 +414,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.output_format == 'json':
                 import json as _json
                 resolved_dir = str(directory) if directory else '.port_sessions'
-                print(_json.dumps({
+                _env = {
                     'session_id': args.session_id,
                     'loaded': False,
                     'error': {
@@ -407,19 +423,21 @@ def main(argv: list[str] | None = None) -> int:
                         'directory': resolved_dir,
                         'retryable': True,
                     },
-                }))
+                }
+                print(_json.dumps(wrap_json_envelope(_env, args.command, exit_code=1)))
             else:
                 print(f'error: {exc}')
             return 1
         if args.output_format == 'json':
             import json as _json
-            print(_json.dumps({
+            _env = {
                 'session_id': session.session_id,
                 'loaded': True,
                 'messages_count': len(session.messages),
                 'input_tokens': session.input_tokens,
                 'output_tokens': session.output_tokens,
-            }))
+            }
+            print(_json.dumps(wrap_json_envelope(_env, args.command)))
         else:
             print(f'{session.session_id}\n{len(session.messages)} messages\nin={session.input_tokens} out={session.output_tokens}')
         return 0
@@ -429,7 +447,8 @@ def main(argv: list[str] | None = None) -> int:
         ids = list_sessions(directory)
         if args.output_format == 'json':
             import json as _json
-            print(_json.dumps({'sessions': ids, 'count': len(ids)}))
+            _env = {'sessions': ids, 'count': len(ids)}
+            print(_json.dumps(wrap_json_envelope(_env, args.command)))
         else:
             if not ids:
                 print('(no sessions)')
@@ -445,7 +464,7 @@ def main(argv: list[str] | None = None) -> int:
         except SessionDeleteError as exc:
             if args.output_format == 'json':
                 import json as _json
-                print(_json.dumps({
+                _env = {
                     'session_id': args.session_id,
                     'deleted': False,
                     'error': {
@@ -453,17 +472,19 @@ def main(argv: list[str] | None = None) -> int:
                         'message': str(exc),
                         'retryable': True,
                     },
-                }))
+                }
+                print(_json.dumps(wrap_json_envelope(_env, args.command, exit_code=1)))
             else:
                 print(f'error: {exc}')
             return 1
         if args.output_format == 'json':
             import json as _json
-            print(_json.dumps({
+            _env = {
                 'session_id': args.session_id,
                 'deleted': deleted,
                 'status': 'deleted' if deleted else 'not_found',
-            }))
+            }
+            print(_json.dumps(wrap_json_envelope(_env, args.command)))
         else:
             if deleted:
                 print(f'deleted: {args.session_id}')
@@ -501,7 +522,7 @@ def main(argv: list[str] | None = None) -> int:
                         'retryable': False,
                     },
                 }
-                print(json.dumps(error_envelope))
+                print(json.dumps(wrap_json_envelope(error_envelope, args.command, exit_code=1)))
             else:
                 print(f'Command not found: {args.name}')
             return 1
@@ -513,7 +534,7 @@ def main(argv: list[str] | None = None) -> int:
                 'source_hint': module.source_hint,
                 'responsibility': module.responsibility,
             }
-            print(json.dumps(output))
+            print(json.dumps(wrap_json_envelope(output, args.command)))
         else:
             print('\n'.join([module.name, module.source_hint, module.responsibility]))
         return 0
@@ -531,7 +552,7 @@ def main(argv: list[str] | None = None) -> int:
                         'retryable': False,
                     },
                 }
-                print(json.dumps(error_envelope))
+                print(json.dumps(wrap_json_envelope(error_envelope, args.command, exit_code=1)))
             else:
                 print(f'Tool not found: {args.name}')
             return 1
@@ -543,7 +564,7 @@ def main(argv: list[str] | None = None) -> int:
                 'source_hint': module.source_hint,
                 'responsibility': module.responsibility,
             }
-            print(json.dumps(output))
+            print(json.dumps(wrap_json_envelope(output, args.command)))
         else:
             print('\n'.join([module.name, module.source_hint, module.responsibility]))
         return 0
@@ -571,7 +592,7 @@ def main(argv: list[str] | None = None) -> int:
                     'handled': True,
                     'message': result.message,
                 }
-            print(json.dumps(envelope))
+            print(json.dumps(wrap_json_envelope(envelope, args.command)))
         else:
             print(result.message)
         return 0 if result.handled else 1
@@ -599,7 +620,7 @@ def main(argv: list[str] | None = None) -> int:
                     'handled': True,
                     'message': result.message,
                 }
-            print(json.dumps(envelope))
+            print(json.dumps(wrap_json_envelope(envelope, args.command)))
         else:
             print(result.message)
         return 0 if result.handled else 1

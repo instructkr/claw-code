@@ -200,7 +200,13 @@ class PortingWorkspaceTests(unittest.TestCase):
                 check=True, capture_output=True, text=True,
             )
             data = json.loads(json_result.stdout)
-            self.assertEqual(data, {'sessions': ['alpha', 'bravo'], 'count': 2})
+            # Verify common envelope fields (SCHEMAS.md contract)
+            self.assertIn('timestamp', data)
+            self.assertEqual(data['command'], 'list-sessions')
+            self.assertEqual(data['schema_version'], '1.0')
+            # Verify command-specific fields
+            self.assertEqual(data['sessions'], ['alpha', 'bravo'])
+            self.assertEqual(data['count'], 2)
 
     def test_delete_session_cli_idempotent(self) -> None:
         """#160: delete-session CLI is idempotent (not-found is exit 0, status=not_found)."""
@@ -221,10 +227,16 @@ class PortingWorkspaceTests(unittest.TestCase):
                 capture_output=True, text=True,
             )
             self.assertEqual(first.returncode, 0)
-            self.assertEqual(
-                json.loads(first.stdout),
-                {'session_id': 'once', 'deleted': True, 'status': 'deleted'},
-            )
+            envelope_first = json.loads(first.stdout)
+            # Verify common envelope fields (SCHEMAS.md contract)
+            self.assertIn('timestamp', envelope_first)
+            self.assertEqual(envelope_first['command'], 'delete-session')
+            self.assertEqual(envelope_first['exit_code'], 0)
+            self.assertEqual(envelope_first['schema_version'], '1.0')
+            # Verify command-specific fields
+            self.assertEqual(envelope_first['session_id'], 'once')
+            self.assertEqual(envelope_first['deleted'], True)
+            self.assertEqual(envelope_first['status'], 'deleted')
             # second delete: idempotent, still exit 0
             second = subprocess.run(
                 [sys.executable, '-m', 'src.main', 'delete-session', 'once',
@@ -232,10 +244,10 @@ class PortingWorkspaceTests(unittest.TestCase):
                 capture_output=True, text=True,
             )
             self.assertEqual(second.returncode, 0)
-            self.assertEqual(
-                json.loads(second.stdout),
-                {'session_id': 'once', 'deleted': False, 'status': 'not_found'},
-            )
+            envelope_second = json.loads(second.stdout)
+            self.assertEqual(envelope_second['session_id'], 'once')
+            self.assertEqual(envelope_second['deleted'], False)
+            self.assertEqual(envelope_second['status'], 'not_found')
 
     def test_delete_session_cli_partial_failure_exit_1(self) -> None:
         """#160: partial-failure (permission error) surfaces as exit 1 + typed JSON error."""

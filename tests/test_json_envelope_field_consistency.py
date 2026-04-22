@@ -169,7 +169,6 @@ class TestJsonEnvelopeCommonFieldPrep:
     13 clawable commands. Currently they document the expected contract.
     """
 
-    @pytest.mark.skip(reason='Common fields not yet wrapped (ROADMAP #173)')
     def test_all_envelopes_include_timestamp(self) -> None:
         """Every clawable envelope must include ISO 8601 UTC timestamp."""
         result = subprocess.run(
@@ -183,12 +182,16 @@ class TestJsonEnvelopeCommonFieldPrep:
         # Verify ISO 8601 format (ends with Z for UTC)
         assert envelope['timestamp'].endswith('Z'), f'Timestamp not UTC: {envelope["timestamp"]}'
 
-    @pytest.mark.skip(reason='Common fields not yet wrapped (ROADMAP #173)')
     def test_all_envelopes_include_command(self) -> None:
         """Every envelope must echo the command name."""
-        for cmd_name in ['list-sessions', 'command-graph', 'bootstrap']:
+        test_cases = [
+            ('list-sessions', []),
+            ('command-graph', []),
+            ('bootstrap', ['hello']),
+        ]
+        for cmd_name, cmd_args in test_cases:
             result = subprocess.run(
-                [sys.executable, '-m', 'src.main', cmd_name, '--output-format', 'json'],
+                [sys.executable, '-m', 'src.main', cmd_name, *cmd_args, '--output-format', 'json'],
                 cwd=Path(__file__).resolve().parent.parent,
                 capture_output=True,
                 text=True,
@@ -196,7 +199,6 @@ class TestJsonEnvelopeCommonFieldPrep:
             envelope = json.loads(result.stdout)
             assert envelope.get('command') == cmd_name, f'{cmd_name} envelope.command mismatch'
 
-    @pytest.mark.skip(reason='Common fields not yet wrapped (ROADMAP #173)')
     def test_all_envelopes_include_exit_code_and_schema_version(self) -> None:
         """Every envelope must include exit_code and schema_version."""
         result = subprocess.run(
