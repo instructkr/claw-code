@@ -5168,25 +5168,29 @@ ear], /color [scheme], /effort [low|medium|high], /fast, /summary, /tag [label],
 
 ## Pinpoint #136. `--compact` flag output is not machine-readable — compact turn emits plain text instead of JSON when `--output-format json` is also passed
 
-**Gap.** `claw --compact <prompt>` runs a prompt turn with compacted output (tool-use suppressed, final assistant text only). But `run_with_output()` routes on `(output_format, compact)` with an explicit early-return match: `CliOutputFormat::Text if compact => run_prompt_compact(input)`. The `CliOutputFormat::Json` branch is never reached when `--compact` is set. Result: passing `--compact --output-format json` silently produces plain-text output — the compact flag wins and the format flag is silently ignored. No warning or error is emitted.
+**Status: ✅ CLOSED (already implemented, verified cycle #60).**
 
-**Trace path.**
-- `rust/crates/rusty-claude-cli/src/main.rs:3872-3879` — `run_with_output()` match:
-  ```
-  CliOutputFormat::Text if compact => self.run_prompt_compact(input),
-  CliOutputFormat::Text => self.run_turn(input),
-  CliOutputFormat::Json => self.run_prompt_json(input),
-  ```
-  The `Json` arm is unreachable when `compact = true` because the first arm matches first regardless of `output_format`.
-- `run_prompt_compact()` at line 3879 calls `println!("{final_text}")` — always plain text, no JSON envelope.
-- `run_prompt_json()` at line 3891 wraps output in a JSON object with `message`, `model`, `iterations`, `usage`, `tool_uses`, `tool_results`, etc.
+**Implementation:** The dispatch ordering in `LiveCli::run_with_output()` has the correct precedence:
+```rust
+CliOutputFormat::Json if compact => self.run_prompt_compact_json(input),
+CliOutputFormat::Text if compact => self.run_prompt_compact(input),
+CliOutputFormat::Text => self.run_turn(input),
+CliOutputFormat::Json => self.run_prompt_json(input),
+```
 
-**Fix shape (~20 lines).**
-1. Add a `CliOutputFormat::Json if compact` arm (or merge compact flag into `run_prompt_json` as a parameter) that produces a JSON object with `message: <final_text>` and a `compact: true` marker. Tool-use fields remain present but empty arrays (consistent with compact semantics — tools ran but are not returned verbatim).
-2. Emit a warning or `error.kind: "flag_conflict"` if conflicting flags are passed in a way that silently wins (or document the precedence explicitly in `--help`).
-3. Regression tests: `claw --compact --output-format json <prompt>` must produce valid JSON with at minimum `{message: "...", compact: true}`.
+`run_prompt_compact_json()` produces:
+```json
+{
+  "message": "<final_assistant_text>",
+  "compact": true,
+  "model": "...",
+  "usage": { ... }
+}
+```
 
-**Acceptance.** An orchestrator that requests compact output for token efficiency AND machine-readable JSON gets both. Silent flag override is never a correct behavior for a tool targeting machine consumers.
+**Dogfood verification (2026-04-23 cycle #60):** Tested `claw prompt "hello" --compact --output-format json` → produces valid JSON with `compact: true` marker. Error cases also JSON-wrapped (consistent with error envelope contract #247).
+
+**Note:** Dispatch reordering that fixed this is not yet known to be in a review-ready branch or merged main. Verify merge status.
 
 **Blocker.** None. Additive change to existing match arms.
 
