@@ -12,7 +12,14 @@ from .port_manifest import build_port_manifest
 from .query_engine import QueryEnginePort
 from .remote_runtime import run_remote_mode, run_ssh_mode, run_teleport_mode
 from .runtime import PortRuntime
-from .session_store import load_session
+from .session_store import (
+    SessionDeleteError,
+    SessionNotFoundError,
+    delete_session,
+    list_sessions,
+    load_session,
+    session_exists,
+)
 from .setup import run_setup
 from .tool_pool import assemble_tool_pool
 from .tools import execute_tool, get_tool, get_tools, render_tool_index
@@ -64,6 +71,35 @@ def build_parser() -> argparse.ArgumentParser:
 
     load_session_parser = subparsers.add_parser('load-session', help='load a previously persisted session')
     load_session_parser.add_argument('session_id')
+
+    list_sessions_parser = subparsers.add_parser(
+        'list-sessions',
+        help='enumerate stored session IDs (#160: claw-native session API)',
+    )
+    list_sessions_parser.add_argument(
+        '--directory', help='session storage directory (default: .port_sessions)'
+    )
+    list_sessions_parser.add_argument(
+        '--output-format',
+        choices=['text', 'json'],
+        default='text',
+        help='output format',
+    )
+
+    delete_session_parser = subparsers.add_parser(
+        'delete-session',
+        help='delete a persisted session (#160: idempotent, race-safe)',
+    )
+    delete_session_parser.add_argument('session_id')
+    delete_session_parser.add_argument(
+        '--directory', help='session storage directory (default: .port_sessions)'
+    )
+    delete_session_parser.add_argument(
+        '--output-format',
+        choices=['text', 'json'],
+        default='text',
+        help='output format',
+    )
 
     remote_parser = subparsers.add_parser('remote-mode', help='simulate remote-control runtime branching')
     remote_parser.add_argument('target')
@@ -167,6 +203,55 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == 'load-session':
         session = load_session(args.session_id)
         print(f'{session.session_id}\n{len(session.messages)} messages\nin={session.input_tokens} out={session.output_tokens}')
+        return 0
+    if args.command == 'list-sessions':
+        from pathlib import Path as _Path
+        directory = _Path(args.directory) if args.directory else None
+        ids = list_sessions(directory)
+        if args.output_format == 'json':
+            import json as _json
+            print(_json.dumps({'sessions': ids, 'count': len(ids)}))
+        else:
+            if not ids:
+                print('(no sessions)')
+            else:
+                for sid in ids:
+                    print(sid)
+        return 0
+    if args.command == 'delete-session':
+        from pathlib import Path as _Path
+        directory = _Path(args.directory) if args.directory else None
+        try:
+            deleted = delete_session(args.session_id, directory)
+        except SessionDeleteError as exc:
+            if args.output_format == 'json':
+                import json as _json
+                print(_json.dumps({
+                    'session_id': args.session_id,
+                    'deleted': False,
+                    'error': {
+                        'kind': 'session_delete_failed',
+                        'message': str(exc),
+                        'retryable': True,
+                    },
+                }))
+            else:
+                print(f'error: {exc}')
+            return 1
+        if args.output_format == 'json':
+            import json as _json
+            print(_json.dumps({
+                'session_id': args.session_id,
+                'deleted': deleted,
+                'status': 'deleted' if deleted else 'not_found',
+            }))
+        else:
+            if deleted:
+                print(f'deleted: {args.session_id}')
+            else:
+                print(f'not found: {args.session_id}')
+        # Exit 0 for both cases — delete_session is idempotent,
+        # not-found is success from a cleanup perspective
         return 0
     if args.command == 'remote-mode':
         print(run_remote_mode(args.target).as_text())

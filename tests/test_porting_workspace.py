@@ -173,6 +173,93 @@ class PortingWorkspaceTests(unittest.TestCase):
         self.assertIn(session_id, result.stdout)
         self.assertIn('messages', result.stdout)
 
+    def test_list_sessions_cli_runs(self) -> None:
+        """#160: list-sessions CLI enumerates stored sessions in text + json."""
+        import json
+        import tempfile
+        from src.session_store import StoredSession, save_session
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            for sid in ['alpha', 'bravo']:
+                save_session(
+                    StoredSession(session_id=sid, messages=('hi',), input_tokens=1, output_tokens=2),
+                    tmp_path,
+                )
+            # text mode
+            text_result = subprocess.run(
+                [sys.executable, '-m', 'src.main', 'list-sessions', '--directory', str(tmp_path)],
+                check=True, capture_output=True, text=True,
+            )
+            self.assertIn('alpha', text_result.stdout)
+            self.assertIn('bravo', text_result.stdout)
+            # json mode
+            json_result = subprocess.run(
+                [sys.executable, '-m', 'src.main', 'list-sessions',
+                 '--directory', str(tmp_path), '--output-format', 'json'],
+                check=True, capture_output=True, text=True,
+            )
+            data = json.loads(json_result.stdout)
+            self.assertEqual(data, {'sessions': ['alpha', 'bravo'], 'count': 2})
+
+    def test_delete_session_cli_idempotent(self) -> None:
+        """#160: delete-session CLI is idempotent (not-found is exit 0, status=not_found)."""
+        import json
+        import tempfile
+        from src.session_store import StoredSession, save_session
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            save_session(
+                StoredSession(session_id='once', messages=('hi',), input_tokens=1, output_tokens=2),
+                tmp_path,
+            )
+            # first delete: success
+            first = subprocess.run(
+                [sys.executable, '-m', 'src.main', 'delete-session', 'once',
+                 '--directory', str(tmp_path), '--output-format', 'json'],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(first.returncode, 0)
+            self.assertEqual(
+                json.loads(first.stdout),
+                {'session_id': 'once', 'deleted': True, 'status': 'deleted'},
+            )
+            # second delete: idempotent, still exit 0
+            second = subprocess.run(
+                [sys.executable, '-m', 'src.main', 'delete-session', 'once',
+                 '--directory', str(tmp_path), '--output-format', 'json'],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(second.returncode, 0)
+            self.assertEqual(
+                json.loads(second.stdout),
+                {'session_id': 'once', 'deleted': False, 'status': 'not_found'},
+            )
+
+    def test_delete_session_cli_partial_failure_exit_1(self) -> None:
+        """#160: partial-failure (permission error) surfaces as exit 1 + typed JSON error."""
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bad = tmp_path / 'locked.json'
+            bad.mkdir()
+            try:
+                result = subprocess.run(
+                    [sys.executable, '-m', 'src.main', 'delete-session', 'locked',
+                     '--directory', str(tmp_path), '--output-format', 'json'],
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 1)
+                data = json.loads(result.stdout)
+                self.assertFalse(data['deleted'])
+                self.assertEqual(data['error']['kind'], 'session_delete_failed')
+                self.assertTrue(data['error']['retryable'])
+            finally:
+                bad.rmdir()
+
     def test_tool_permission_filtering_cli_runs(self) -> None:
         result = subprocess.run(
             [sys.executable, '-m', 'src.main', 'tools', '--limit', '10', '--deny-prefix', 'mcp'],
