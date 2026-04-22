@@ -157,8 +157,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     show_command = subparsers.add_parser('show-command', help='show one mirrored command entry by exact name')
     show_command.add_argument('name')
+    show_command.add_argument('--output-format', choices=['text', 'json'], default='text')
     show_tool = subparsers.add_parser('show-tool', help='show one mirrored tool entry by exact name')
     show_tool.add_argument('name')
+    show_tool.add_argument('--output-format', choices=['text', 'json'], default='text')
 
     exec_command_parser = subparsers.add_parser('exec-command', help='execute a mirrored command shim by exact name')
     exec_command_parser.add_argument('name')
@@ -394,16 +396,62 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == 'show-command':
         module = get_command(args.name)
         if module is None:
-            print(f'Command not found: {args.name}')
+            if args.output_format == 'json':
+                import json
+                error_envelope = {
+                    'name': args.name,
+                    'found': False,
+                    'error': {
+                        'kind': 'command_not_found',
+                        'message': f'Unknown command: {args.name}',
+                        'retryable': False,
+                    },
+                }
+                print(json.dumps(error_envelope))
+            else:
+                print(f'Command not found: {args.name}')
             return 1
-        print('\n'.join([module.name, module.source_hint, module.responsibility]))
+        if args.output_format == 'json':
+            import json
+            output = {
+                'name': module.name,
+                'found': True,
+                'source_hint': module.source_hint,
+                'responsibility': module.responsibility,
+            }
+            print(json.dumps(output))
+        else:
+            print('\n'.join([module.name, module.source_hint, module.responsibility]))
         return 0
     if args.command == 'show-tool':
         module = get_tool(args.name)
         if module is None:
-            print(f'Tool not found: {args.name}')
+            if args.output_format == 'json':
+                import json
+                error_envelope = {
+                    'name': args.name,
+                    'found': False,
+                    'error': {
+                        'kind': 'tool_not_found',
+                        'message': f'Unknown tool: {args.name}',
+                        'retryable': False,
+                    },
+                }
+                print(json.dumps(error_envelope))
+            else:
+                print(f'Tool not found: {args.name}')
             return 1
-        print('\n'.join([module.name, module.source_hint, module.responsibility]))
+        if args.output_format == 'json':
+            import json
+            output = {
+                'name': module.name,
+                'found': True,
+                'source_hint': module.source_hint,
+                'responsibility': module.responsibility,
+            }
+            print(json.dumps(output))
+        else:
+            print('\n'.join([module.name, module.source_hint, module.responsibility]))
         return 0
     if args.command == 'exec-command':
         result = execute_command(args.name, args.prompt)
