@@ -41,6 +41,8 @@ def wrap_json_envelope(data: dict, command: str, exit_code: int = 0) -> dict:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='Python porting workspace for the Claude Code rewrite effort')
+    # #180: Add --version flag to match canonical CLI contract
+    parser.add_argument('--version', action='version', version='claw-code 1.0.0 (Python harness)')
     subparsers = parser.add_subparsers(dest='command', required=True)
     subparsers.add_parser('summary', help='render a Markdown summary of the Python porting workspace')
     subparsers.add_parser('manifest', help='print the current Python workspace manifest')

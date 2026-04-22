@@ -277,3 +277,30 @@ class TestEnvelopeExitCodeMatchesProcessExit:
             'Envelope exit_code must match process exit code:\n' + 
             '\n'.join(mismatches)
         )
+
+
+class TestMetadataFlags:
+    """Cycle #28: --version flag implementation (#180 gap closure)."""
+
+    def test_version_flag_returns_version_text(self) -> None:
+        """--version returns version string and exits successfully."""
+        result = _run(['--version'])
+        assert result.returncode == 0
+        assert 'claw-code' in result.stdout
+        assert '1.0.0' in result.stdout
+
+    def test_help_flag_returns_help_text(self) -> None:
+        """--help returns help text and exits successfully."""
+        result = _run(['--help'])
+        assert result.returncode == 0
+        assert 'usage:' in result.stdout
+        assert 'Python porting workspace' in result.stdout
+
+    def test_help_still_works_after_version_added(self) -> None:
+        """Verify -h and --help both work (no regression)."""
+        result_short = _run(['-h'])
+        result_long = _run(['--help'])
+        assert result_short.returncode == 0
+        assert result_long.returncode == 0
+        assert 'usage:' in result_short.stdout
+        assert 'usage:' in result_long.stdout
