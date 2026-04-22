@@ -8,5 +8,8 @@ archive/
 # Claw Code local artifacts
 .claw/settings.local.json
 .claw/sessions/
+# #160/#166: default session storage directory (flush-transcript output,
+# dogfood runs, etc.). Claws specifying --directory elsewhere are fine.
+.port_sessions/
 .clawhip/
 status-help.txt
