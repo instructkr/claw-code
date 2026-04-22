@@ -98,7 +98,57 @@ cd rust
 
 ### JSON output for scripting
 
-All clawable commands support `--output-format json` for machine-readable output. Every invocation returns a consistent JSON envelope with `exit_code`, `command`, `timestamp`, and either `{success fields}` or `{error: {kind, message, ...}}`.
+All clawable commands support `--output-format json` for machine-readable output.
+
+**IMPORTANT SCHEMA VERSION NOTICE:**
+
+The JSON envelope is currently in **v1.0 (flat shape)** and is scheduled to migrate to **v2.0 (nested schema)** in a future release. See [`FIX_LOCUS_164.md`](./FIX_LOCUS_164.md) for the full migration plan.
+
+#### Current (v1.0) envelope shape
+
+**Success envelope** — verb-specific fields + `kind: "<verb-name>"`:
+```json
+{
+  "kind": "doctor",
+  "checks": [...],
+  "summary": {...},
+  "has_failures": false,
+  "report": "...",
+  "message": "..."
+}
+```
+
+**Error envelope** — flat error fields at top level:
+```json
+{
+  "error": "unrecognized argument `foo`",
+  "hint": "Run `claw --help` for usage.",
+  "kind": "cli_parse",
+  "type": "error"
+}
+```
+
+**Known issues with v1.0:**
+- Missing `exit_code`, `command`, `timestamp`, `output_format`, `schema_version` fields
+- `error` is a string, not a structured object with operation/target/retryable/message/hint
+- `kind` field is semantically overloaded (verb identity in success, error classification in error)
+- See [`SCHEMAS.md`](./SCHEMAS.md) for documented (v2.0 target) schema and [`FIX_LOCUS_164.md`](./FIX_LOCUS_164.md) for migration details
+
+#### Using v1.0 envelopes in your code
+
+**Success path:** Check for absence of `type: "error"`, then access verb-specific fields:
+```bash
+cd rust
+./target/debug/claw doctor --output-format json | jq '.kind, .has_failures'
+```
+
+**Error path:** Check for `type == "error"`, then access `error` (string) and `kind` (error classification):
+```bash
+cd rust
+./target/debug/claw doctor invalid-arg --output-format json | jq '.error, .kind'
+```
+
+**Do NOT rely on `kind` alone for dispatching** — it has different meanings in success vs. error. Always check `type == "error"` first.
 
 ```bash
 cd rust
@@ -108,6 +158,8 @@ cd rust
 ```
 
 **Building a dispatcher or orchestration script?** See [`ERROR_HANDLING.md`](./ERROR_HANDLING.md) for the unified error-handling pattern. One code example works for all 14 clawable commands: parse the exit code, classify by `error.kind`, apply recovery strategies (retry, timeout recovery, validation, logging). Use that pattern instead of reimplementing error handling per command.
+
+**Migrating to v2.0?** Check back after [`FIX_LOCUS_164`](./FIX_LOCUS_164.md) is implemented. Phase 1 will add a `--envelope-version=2.0` flag for opt-in access to the structured envelope schema. Phase 2 will make v2.0 the default. Phase 3 will deprecate v1.0.
 
 ### Inspect worker state
 
