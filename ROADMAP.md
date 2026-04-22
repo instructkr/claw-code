@@ -7399,3 +7399,120 @@ Mark #130c, #130d, #130e as **closed** in backlog. Remove from active cluster li
 
 ---
 
+
+---
+
+## Cluster Closure Note: No-Arg Verb Suffix-Guard Family — COMPLETE
+
+**Timeline: Cycles #55-#56, ~11 minutes**
+
+### What the Family Solved
+
+Universal parser-level contract: **every no-arg diagnostic verb rejects trailing garbage arguments at parse time** instead of silently accepting them.
+
+### Framing (Gaebal-gajae, Cycle #56)
+
+Contract shapes were mixed across verbs. Separating them clarified what was a bug vs. a design choice:
+
+**Closed (14 verbs, all uniform):**
+help, version, status, sandbox, doctor, state, init, diff, plugins, skills, system-prompt, dump-manifests, bootstrap-plan, acp
+
+**Legitimate positional (not bugs):**
+- `export <file-path>` — file path is intended arg
+- `agents <subaction>` — takes subactions like list/help
+- `mcp <subaction>` — takes subactions like list/show/help
+
+### Deferred Design Questions (filed below as #155, #156)
+
+Two contract-shape questions surfaced during sweep. Not bugs, but worth recording so future cycles know they're open design choices, not oversights.
+
+---
+
+## Pinpoint #155. `claw config <section>` accepts any string as section name without validation — design question
+
+**Observation (cycle #56 sweep, 2026-04-23 02:22 Seoul):**
+
+```bash
+$ claw config garbage
+Config
+  Working directory /path/to/project
+  Loaded files      1
+  ...
+```
+
+The `garbage` is accepted as a section name. The output doesn't change whether you pass a valid section (`env`, `hooks`, `model`, `plugins`) or invalid garbage. Parser accepts any string as Section; runtime applies no filter or validation.
+
+**Design question:**
+- Option A — **Strict whitelist**: Reject unknown section names at parse time. Error: `unknown section 'garbage'. Valid sections: env, hooks, model, plugins`.
+- Option B — **Advisory validation**: Warn if section isn't recognized, but continue. `[warning] unknown section 'garbage'; showing full config`.
+- Option C — **Accept as filter hint**: Keep current behavior but make the output actually filter by section when section is specified. Today it shows the same thing regardless.
+
+**Why this is not a bug (yet):**
+- The section parameter is currently **not actually used by the runtime** — output is the same with or without section.
+- Adding validation requires deciding what sections mean first.
+
+**Priority:** Medium. Low implementation cost (small match) but needs design decision first.
+
+---
+
+## Pinpoint #156. `claw mcp` / `claw agents` use soft-warning contract instead of hard error for unknown args — design question
+
+**Observation (cycle #56 sweep):**
+
+```bash
+$ claw mcp garbage
+MCP
+  Usage            /mcp [list|show <server>|help]
+  Direct CLI       claw mcp [list|show <server>|help]
+  Sources          .claw/settings.json, .claw/settings.local.json
+  Unexpected       garbage
+```
+
+Both `mcp` and `agents` show help + "Unexpected: <arg>" warning line, but still exit 0 and display help. Contrast with `plugins --help`, which emits hard error on unknown actions.
+
+**Design question:**
+- Option A — **Normalize to hard-error**: All subaction-taking verbs (`mcp`, `agents`, `plugins`) should reject unknown subactions consistently (like `plugins` does now).
+- Option B — **Normalize to soft-warning**: Standardize on "show help + exit 0" with Unexpected warning; apply to `plugins` too.
+- Option C — **Keep as-is**: `mcp`/`agents` treat help as default/fallback; `plugins` treats help as explicit action.
+
+**Why this is not an obvious bug:**
+- The soft-warning contract IS useful for discovery — new user typos don't block exploration.
+- But it's inconsistent with `plugins` which hard-errors.
+
+**Priority:** Low-Medium. Depends on whether downstream claws parse exit codes or output. Soft-warning plays badly with scripted callers.
+
+---
+
+### Pattern Reference (for future suffix-guard work)
+
+The proven pattern for no-arg verbs:
+
+```rust
+"<verb>" => {
+    if rest.len() > 1 {
+        return Err(format!(
+            "unrecognized argument `{}` for subcommand `<verb>`",
+            rest[1]
+        ));
+    }
+    Ok(CliAction::<Verb> { output_format })
+}
+```
+
+Time to apply: ~3 minutes per verb. Infrastructure is mature.
+
+### Commit Summary
+
+```
+#55: 860f285 fix(#152-follow-up): claw init rejects trailing arguments
+#56: 3a533ce fix(#152-follow-up-2): claw bootstrap-plan rejects trailing arguments
+```
+
+### Recommended Action
+
+- Mark #152 as closed in backlog (all resolvable no-arg cases resolved).
+- Track #155 and #156 as active design questions, not bugs.
+- No further auto-sweep work needed on suffix-guard family.
+
+---
+
