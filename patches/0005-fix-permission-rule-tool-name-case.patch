@@ -1,0 +1,68 @@
+Fix permission rule tool-name case to match the registry
+
+`mvp_tool_specs` (`tools/lib.rs:388`) registers the bash tool as
+lowercase `"bash"`. `PermissionRule::matches` (`permissions.rs:378`)
+performs exact string equality on tool names. Patch 0001 used capital
+`"Bash"` in deny and ask rules — these never match a real `bash`
+invocation, so the hardened config silently does nothing.
+
+The capital-B form was copied from upstream's `ROADMAP.md` examples,
+which appear to be aspirational documentation rather than the actual
+runtime convention. Switch to lowercase `bash` to match the registry.
+
+Discovered while probing the harness against a local Ollama model on
+2026-04-24: a `bash` tool call with `ls -la` ran without triggering
+the `ask: ["Bash"]` catch-all that was supposed to surface every Bash
+invocation for confirmation.
+
+Note: this patch only fixes the rule-name match. It does NOT explain
+why a `bash` call (which requires `DangerFullAccess`) ran while the
+active mode is `default` (= ReadOnly). That's a separate trace —
+likely the `claw prompt` subcommand resolves to a more permissive mode
+than `.claw.json` declares. Verify by testing with a deny rule that
+*should* now fire (e.g. `bash(sudo:*)`) after applying this patch.
+---
+diff --git a/.claude.json b/.claude.json
+--- a/.claude.json
++++ b/.claude.json
+@@ -2,12 +2,12 @@
+   "permissions": {
+     "defaultMode": "default",
+     "deny": [
+-      "Bash(curl:*)",
+-      "Bash(wget:*)",
+-      "Bash(sudo:*)",
+-      "Bash(rm:*)"
++      "bash(curl:*)",
++      "bash(wget:*)",
++      "bash(sudo:*)",
++      "bash(rm:*)"
+     ],
+     "ask": [
+-      "Bash"
++      "bash"
+     ]
+   }
+ }
+diff --git a/rust/.claw.json b/rust/.claw.json
+--- a/rust/.claw.json
++++ b/rust/.claw.json
+@@ -2,12 +2,12 @@
+   "permissions": {
+     "defaultMode": "default",
+     "deny": [
+-      "Bash(curl:*)",
+-      "Bash(wget:*)",
+-      "Bash(sudo:*)",
+-      "Bash(rm:*)"
++      "bash(curl:*)",
++      "bash(wget:*)",
++      "bash(sudo:*)",
++      "bash(rm:*)"
+     ],
+     "ask": [
+-      "Bash"
++      "bash"
+     ]
+   }
+ }

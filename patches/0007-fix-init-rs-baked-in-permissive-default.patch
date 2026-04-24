@@ -1,0 +1,67 @@
+Fix init.rs baking the permissive `dontAsk` default into new projects
+
+`init.rs::STARTER_CLAW_JSON` (line 4) was the per-project counterpart
+to the repo-level `dontAsk` default that patch 0001 fixed in
+`.claude.json` and `rust/.claw.json`. Without this patch, every fresh
+`claw init` would still write a `.claw.json` with
+`"defaultMode": "dontAsk"`, which `runtime/config.rs:858` resolves to
+`ResolvedPermissionMode::DangerFullAccess` — i.e. tools fire without
+prompts in any newly-initialised project, defeating the hardening
+done in 0001.
+
+Replace the starter config with the same verified-working pattern
+that's now in the repo's own `.claude.json` / `rust/.claw.json`:
+
+  - `defaultMode: "default"` (resolves to `ReadOnly` — safe baseline)
+  - `deny: [bash(curl:*), bash(wget:*), bash(sudo:*), bash(rm:*)]`
+    (hard-block exfil + privilege-escalation + filesystem destruction)
+  - `ask: [bash]` (catch-all prompt for anything else)
+
+Update the `initialize_repo_writes_starter_files_and_claude_md` test
+fixture (`init.rs:412`) to match the new expected output. All 179
+`rusty-claude-cli` bin tests pass after the change; full workspace
+suite (956 tests) also green.
+
+The case-fix from patch 0005 (`Bash` → `bash`) is already correct in
+this patch since the new entries use the lowercase form that matches
+`mvp_tool_specs` (`tools/lib.rs:388`).
+---
+diff --git a/rust/crates/rusty-claude-cli/src/init.rs b/rust/crates/rusty-claude-cli/src/init.rs
+--- a/rust/crates/rusty-claude-cli/src/init.rs
++++ b/rust/crates/rusty-claude-cli/src/init.rs
+@@ -4,7 +4,16 @@
+ const STARTER_CLAW_JSON: &str = concat!(
+     "{\n",
+     "  \"permissions\": {\n",
+-    "    \"defaultMode\": \"dontAsk\"\n",
++    "    \"defaultMode\": \"default\",\n",
++    "    \"deny\": [\n",
++    "      \"bash(curl:*)\",\n",
++    "      \"bash(wget:*)\",\n",
++    "      \"bash(sudo:*)\",\n",
++    "      \"bash(rm:*)\"\n",
++    "    ],\n",
++    "    \"ask\": [\n",
++    "      \"bash\"\n",
++    "    ]\n",
+     "  }\n",
+     "}\n",
+ );
+@@ -409,7 +418,16 @@
+             concat!(
+                 "{\n",
+                 "  \"permissions\": {\n",
+-                "    \"defaultMode\": \"dontAsk\"\n",
++                "    \"defaultMode\": \"default\",\n",
++                "    \"deny\": [\n",
++                "      \"bash(curl:*)\",\n",
++                "      \"bash(wget:*)\",\n",
++                "      \"bash(sudo:*)\",\n",
++                "      \"bash(rm:*)\"\n",
++                "    ],\n",
++                "    \"ask\": [\n",
++                "      \"bash\"\n",
++                "    ]\n",
+                 "  }\n",
+                 "}\n",
+             )

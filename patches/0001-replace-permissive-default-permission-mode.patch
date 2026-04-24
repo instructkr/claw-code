@@ -1,0 +1,56 @@
+Replace shipped `dontAsk` permission default with deny+ask config
+
+Both `.claude.json` (root) and `rust/.claw.json` shipped with
+`{"permissions": {"defaultMode": "dontAsk"}}`, which the runtime resolves to
+`ResolvedPermissionMode::DangerFullAccess` (runtime/src/config.rs:858). Every
+tool in `mvp_tool_specs` requires `DangerFullAccess`, so under the shipped
+default every tool call satisfies the policy gate trivially — bash and file
+writes execute without prompting.
+
+Replace with `defaultMode: "default"` (resolves to ReadOnly), an explicit
+deny list for the highest-leverage shell commands, and an `ask` catch-all so
+any uncovered Bash invocation surfaces for confirmation rather than running
+silently.
+
+`.claude.json` is included so opening the repo in Claude Code itself doesn't
+also inherit the permissive default. `rust/.claw.json` is the file the `claw`
+binary reads when started from the workspace.
+---
+diff --git a/.claude.json b/.claude.json
+--- a/.claude.json
++++ b/.claude.json
+@@ -1,5 +1,14 @@
+ {
+   "permissions": {
+-    "defaultMode": "dontAsk"
++    "defaultMode": "default",
++    "deny": [
++      "Bash(curl:*)",
++      "Bash(wget:*)",
++      "Bash(sudo:*)",
++      "Bash(rm:*)"
++    ],
++    "ask": [
++      "Bash"
++    ]
+   }
+ }
+diff --git a/rust/.claw.json b/rust/.claw.json
+--- a/rust/.claw.json
++++ b/rust/.claw.json
+@@ -1,5 +1,14 @@
+ {
+   "permissions": {
+-    "defaultMode": "dontAsk"
++    "defaultMode": "default",
++    "deny": [
++      "Bash(curl:*)",
++      "Bash(wget:*)",
++      "Bash(sudo:*)",
++      "Bash(rm:*)"
++    ],
++    "ask": [
++      "Bash"
++    ]
+   }
+ }
