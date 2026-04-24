@@ -1,0 +1,77 @@
+Accept multi-segment upstream model ids (LMStudio, HF TGI, etc.)
+
+`validate_model_syntax` rejected any `--model` arg whose split-by-'/'
+produced more than two parts. That made it impossible to point claw
+at OpenAI-compat backends that report path-style model identifiers,
+which is the norm for:
+
+  - LMStudio: `qwen/qwen3.5-9b`, `lmstudio-community/Qwen2.5-7B-Instruct-GGUF`
+  - Hugging Face TGI: `meta-llama/Meta-Llama-3-8B-Instruct`
+  - Ollama with namespaced model tags
+  - vLLM serving HF model paths
+
+Discovered 2026-04-24 attempting `claw prompt --model openai/qwen/qwen3.5-9b
+...` against a remote LMStudio at `http://<host>:1234/v1`. The provider
+routing layer (`api/providers/mod.rs::metadata_for_model`) already
+handles `openai/...` prefixes correctly, and the wire-format normalizer
+(`api/providers/openai_compat.rs::strip_routing_prefix`, line 799) uses
+`find('/')` for first-occurrence-only splitting, so it correctly emits
+`qwen/qwen3.5-9b` to LMStudio. Only the CLI-side validator was wrong.
+
+Fix: change `split('/')` to `splitn(2, '/')` in `validate_model_syntax`
+so the split caps at the routing prefix and the rest of the model id
+is treated as opaque. Two-segment ids (`openai/gpt-4`) still work
+identically; multi-segment ids are now accepted.
+
+Adds a regression test case asserting that
+`openai/qwen/qwen3.5-9b`, `openai/lmstudio-community/Qwen2.5-7B-Instruct-GGUF`,
+and `openai/meta-llama/Meta-Llama-3-8B-Instruct` all parse successfully.
+---
+diff --git a/rust/crates/rusty-claude-cli/src/main.rs b/rust/crates/rusty-claude-cli/src/main.rs
+--- a/rust/crates/rusty-claude-cli/src/main.rs
++++ b/rust/crates/rusty-claude-cli/src/main.rs
+@@ -1460,8 +1460,13 @@
+             trimmed
+         ));
+     }
+-    // Check provider/model format: provider_id/model_id
+-    let parts: Vec<&str> = trimmed.split('/').collect();
++    // Check provider/model format: provider_id/model_id.
++    // Split only on the FIRST '/' so multi-segment upstream model ids
++    // like LMStudio's "qwen/qwen3.5-9b" or HF-style "meta-llama/Llama-3-8B"
++    // are accepted as `openai/qwen/qwen3.5-9b` etc. The downstream
++    // `strip_routing_prefix` (api/providers/openai_compat.rs) already
++    // uses `find('/')` so the wire form is handled correctly.
++    let parts: Vec<&str> = trimmed.splitn(2, '/').collect();
+     if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+         // #154: hint if the model looks like it belongs to a different provider
+         let mut err_msg = format!(
+@@ -9026,7 +9031,8 @@
+         resolve_repl_model, resolve_session_reference, response_to_events,
+         resume_supported_slash_commands, run_resume_command, short_tool_id,
+         slash_command_completion_candidates_with_sessions, status_context,
+-        summarize_tool_payload_for_markdown, try_resolve_bare_skill_prompt, validate_no_args,
++        summarize_tool_payload_for_markdown, try_resolve_bare_skill_prompt, validate_model_syntax,
++        validate_no_args,
+         write_mcp_server_fixture, CliAction, CliOutputFormat, CliToolExecutor, GitWorkspaceSummary,
+         InternalPromptProgressEvent, InternalPromptProgressState, LiveCli, LocalHelpTopic,
+         PromptHistoryEntry, SlashCommand, StatusUsage, DEFAULT_MODEL, LATEST_SESSION_REFERENCE,
+@@ -10418,6 +10424,18 @@
+             !err_garbage.contains("Did you mean"),
+             "Unrelated model errors should not get a hint: {err_garbage}"
+         );
++        // Multi-segment upstream model ids (LMStudio, HF TGI, etc.) must be
++        // accepted under the openai/ routing prefix. Splitting on every '/'
++        // would reject these as "more than two parts".
++        for valid in [
++            "openai/qwen/qwen3.5-9b",
++            "openai/lmstudio-community/Qwen2.5-7B-Instruct-GGUF",
++            "openai/meta-llama/Meta-Llama-3-8B-Instruct",
++        ] {
++            validate_model_syntax(valid).unwrap_or_else(|e| {
++                panic!("multi-segment model id {valid:?} should be accepted but got: {e}")
++            });
++        }
+     }
+
+     #[test]
