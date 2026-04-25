@@ -5,7 +5,7 @@
 //! access and can be refreshed at any time.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{OnceLock, RwLock};
 
 use serde::Deserialize;

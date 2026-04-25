@@ -459,6 +459,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         )?,
         CliAction::HelpTopic(topic) => print_help_topic(topic),
         CliAction::Help { output_format } => print_help(output_format)?,
+        CliAction::Rpc => {
+            sdk::run_rpc_server()?;
+        }
     }
     Ok(())
 }
@@ -564,6 +567,8 @@ enum CliAction {
     Help {
         output_format: CliOutputFormat,
     },
+    /// Run JSON-RPC server over stdin/stdout for agent integration.
+    Rpc,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -672,6 +677,19 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                     .ok_or_else(|| "missing value for --output-format".to_string())?;
                 output_format = CliOutputFormat::parse(value)?;
                 index += 2;
+            }
+            "--mode" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "missing value for --mode".to_string())?;
+                if value == "rpc" {
+                    return Ok(CliAction::Rpc);
+                } else {
+                    return Err(format!("unknown mode: {value} (supported: rpc)"));
+                }
+            }
+            "--mode=rpc" => {
+                return Ok(CliAction::Rpc);
             }
             "--permission-mode" => {
                 let value = args
