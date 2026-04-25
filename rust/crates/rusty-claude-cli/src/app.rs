@@ -48,6 +48,9 @@ use tools::{
 
 use crate::args::*;
 use crate::format::*;
+use crate::tui::permission::{
+    format_enhanced_permission_prompt, parse_permission_response, PermissionDecision,
+};
 use crate::tui::status_bar::{StatusBar, StatusBarState};
 use crate::{
     AllowedToolSet, RuntimePluginStateBuildOutput, DEFAULT_DATE,
@@ -1862,11 +1865,15 @@ impl runtime::HookProgressReporter for CliHookProgressReporter {
 
 pub(crate) struct CliPermissionPrompter {
     current_mode: PermissionMode,
+    approve_all: bool,
 }
 
 impl CliPermissionPrompter {
     pub(crate) fn new(current_mode: PermissionMode) -> Self {
-        Self { current_mode }
+        Self {
+            current_mode,
+            approve_all: false,
+        }
     }
 }
 
@@ -1875,33 +1882,44 @@ impl runtime::PermissionPrompter for CliPermissionPrompter {
         &mut self,
         request: &runtime::PermissionRequest,
     ) -> runtime::PermissionPromptDecision {
-        println!();
-        println!("Permission approval required");
-        println!("  Tool             {}", request.tool_name);
-        println!("  Current mode     {}", self.current_mode.as_str());
-        println!("  Required mode    {}", request.required_mode.as_str());
-        if let Some(reason) = &request.reason {
-            println!("  Reason           {reason}");
+        if self.approve_all {
+            return runtime::PermissionPromptDecision::Allow;
         }
-        println!("  Input            {}", request.input);
-        print!("Approve this tool call? [y/N]: ");
+
+        let input = serde_json::from_str(&request.input)
+            .unwrap_or(serde_json::Value::String(request.input.clone()));
+        let prompt = format_enhanced_permission_prompt(
+            &request.tool_name,
+            &input,
+            &self.current_mode.as_str(),
+            &request.required_mode.as_str(),
+            request.reason.as_deref(),
+        );
+        println!("{prompt}");
         let _ = io::stdout().flush();
 
         let mut response = String::new();
         match io::stdin().read_line(&mut response) {
-            Ok(_) => {
-                let normalized = response.trim().to_ascii_lowercase();
-                if matches!(normalized.as_str(), "y" | "yes") {
+            Ok(_) => match parse_permission_response(&response) {
+                PermissionDecision::Allow => runtime::PermissionPromptDecision::Allow,
+                PermissionDecision::AllowAll => {
+                    self.approve_all = true;
                     runtime::PermissionPromptDecision::Allow
-                } else {
-                    runtime::PermissionPromptDecision::Deny {
-                        reason: format!(
-                            "tool '{}' denied by user approval prompt",
-                            request.tool_name
-                        ),
-                    }
                 }
-            }
+                PermissionDecision::ViewInput => {
+                    // Print the raw input on its own line so the user can inspect it
+                    println!();
+                    println!("Input:\n{}", request.input);
+                    // Re-prompt
+                    self.decide(request)
+                }
+                PermissionDecision::Deny { reason: _ } => runtime::PermissionPromptDecision::Deny {
+                    reason: format!(
+                        "tool '{}' denied by user approval prompt",
+                        request.tool_name
+                    ),
+                },
+            },
             Err(error) => runtime::PermissionPromptDecision::Deny {
                 reason: format!("permission approval failed: {error}"),
             },
