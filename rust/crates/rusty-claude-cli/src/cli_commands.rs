@@ -13,6 +13,7 @@ use std::process::Command;
 use crate::app::*;
 use crate::args::*;
 use crate::format::*;
+use crate::tui::diff_view::format_colored_diff;
 use crate::{
     BUILD_TARGET, DEFAULT_DATE, DEPRECATED_INSTALL_COMMAND, GIT_SHA, OFFICIAL_REPO_SLUG,
     OFFICIAL_REPO_URL, VERSION,
@@ -480,10 +481,12 @@ pub(crate) fn render_diff_report_for(cwd: &Path) -> Result<String, Box<dyn std::
 
     let mut sections = Vec::new();
     if !staged.trim().is_empty() {
-        sections.push(format!("Staged changes:\n{}", staged.trim_end()));
+        let colored = format_colored_diff(staged.trim_end());
+        sections.push(format!("Staged changes:\n{colored}"));
     }
     if !unstaged.trim().is_empty() {
-        sections.push(format!("Unstaged changes:\n{}", unstaged.trim_end()));
+        let colored = format_colored_diff(unstaged.trim_end());
+        sections.push(format!("Unstaged changes:\n{colored}"));
     }
 
     Ok(format!("Diff\n\n{}", sections.join("\n\n")))

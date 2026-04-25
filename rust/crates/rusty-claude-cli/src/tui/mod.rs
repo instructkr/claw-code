@@ -1,7 +1,12 @@
+pub mod diff_view;
 pub mod permission;
 pub mod status_bar;
 pub mod tool_panel;
 
+pub use diff_view::{
+    format_colored_diff, parse_unified_diff, render_colored_diff, render_diff_summary, DiffCounts,
+    DiffLine,
+};
 pub use permission::{
     describe_tool_action, format_enhanced_permission_prompt, parse_permission_response,
     PermissionDecision,
