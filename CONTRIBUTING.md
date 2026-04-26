@@ -1,6 +1,6 @@
 # Contributing to claw-code
 
-Thanks for your interest. This project follows the **gaebal-gajae pinpoint cadence** — 43+ pinpoints filed and counting. Here's how to contribute effectively.
+Thanks for your interest. This project follows the **gaebal-gajae pinpoint cadence** — see [ROADMAP.md](./ROADMAP.md) for the current pinpoint census. Here's how to contribute effectively.
 
 ## Filing a ROADMAP Pinpoint
 
