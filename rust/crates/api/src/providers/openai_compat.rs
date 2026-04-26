@@ -19,6 +19,9 @@ use super::{preflight_message_request, Provider, ProviderFuture};
 pub const DEFAULT_XAI_BASE_URL: &str = "https://api.x.ai/v1";
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 pub const DEFAULT_DASHSCOPE_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
+pub const DEFAULT_DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/v1";
+pub const DEFAULT_OLLAMA_BASE_URL: &str = "http://localhost:11434/v1";
+pub const DEFAULT_VLLM_BASE_URL: &str = "http://localhost:8000/v1";
 const REQUEST_ID_HEADER: &str = "request-id";
 const ALT_REQUEST_ID_HEADER: &str = "x-request-id";
 const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
@@ -41,11 +44,19 @@ pub struct OpenAiCompatConfig {
 const XAI_ENV_VARS: &[&str] = &["XAI_API_KEY"];
 const OPENAI_ENV_VARS: &[&str] = &["OPENAI_API_KEY"];
 const DASHSCOPE_ENV_VARS: &[&str] = &["DASHSCOPE_API_KEY"];
+const DEEPSEEK_ENV_VARS: &[&str] = &["DEEPSEEK_API_KEY"];
+const OLLAMA_ENV_VARS: &[&str] = &[];
+const QWEN_ENV_VARS: &[&str] = &["QWEN_API_KEY"];
+const VLLM_ENV_VARS: &[&str] = &[];
 
 // Provider-specific request body size limits in bytes
 const XAI_MAX_REQUEST_BODY_BYTES: usize = 52_428_800; // 50MB
 const OPENAI_MAX_REQUEST_BODY_BYTES: usize = 104_857_600; // 100MB
 const DASHSCOPE_MAX_REQUEST_BODY_BYTES: usize = 6_291_456; // 6MB (observed limit in dogfood)
+const DEEPSEEK_MAX_REQUEST_BODY_BYTES: usize = 104_857_600; // 100MB
+const OLLAMA_MAX_REQUEST_BODY_BYTES: usize = 104_857_600; // 100MB (local, generous)
+const QWEN_MAX_REQUEST_BODY_BYTES: usize = 104_857_600; // 100MB
+const VLLM_MAX_REQUEST_BODY_BYTES: usize = 104_857_600; // 100MB (local, generous)
 
 impl OpenAiCompatConfig {
     #[must_use]
@@ -85,12 +96,66 @@ impl OpenAiCompatConfig {
         }
     }
 
+    /// DeepSeek native API (deepseek-chat, deepseek-reasoner).
+    /// OpenAI-compatible REST shape at /v1.
+    #[must_use]
+    pub const fn deepseek() -> Self {
+        Self {
+            provider_name: "DeepSeek",
+            api_key_env: "DEEPSEEK_API_KEY",
+            base_url_env: "DEEPSEEK_BASE_URL",
+            default_base_url: DEFAULT_DEEPSEEK_BASE_URL,
+            max_request_body_bytes: DEEPSEEK_MAX_REQUEST_BODY_BYTES,
+        }
+    }
+
+    /// Ollama local inference server. No auth required by default.
+    #[must_use]
+    pub const fn ollama() -> Self {
+        Self {
+            provider_name: "Ollama",
+            api_key_env: "",
+            base_url_env: "OLLAMA_BASE_URL",
+            default_base_url: DEFAULT_OLLAMA_BASE_URL,
+            max_request_body_bytes: OLLAMA_MAX_REQUEST_BODY_BYTES,
+        }
+    }
+
+    /// Qwen models served outside Alibaba DashScope (local, third-party API, etc.).
+    /// Configure `QWEN_API_KEY` and/or `QWEN_BASE_URL`.
+    #[must_use]
+    pub const fn qwen() -> Self {
+        Self {
+            provider_name: "Qwen",
+            api_key_env: "QWEN_API_KEY",
+            base_url_env: "QWEN_BASE_URL",
+            default_base_url: "",
+            max_request_body_bytes: QWEN_MAX_REQUEST_BODY_BYTES,
+        }
+    }
+
+    /// vLLM local inference server. No auth required by default.
+    #[must_use]
+    pub const fn vllm() -> Self {
+        Self {
+            provider_name: "vLLM",
+            api_key_env: "",
+            base_url_env: "VLLM_BASE_URL",
+            default_base_url: DEFAULT_VLLM_BASE_URL,
+            max_request_body_bytes: VLLM_MAX_REQUEST_BODY_BYTES,
+        }
+    }
+
     #[must_use]
     pub fn credential_env_vars(self) -> &'static [&'static str] {
         match self.provider_name {
             "xAI" => XAI_ENV_VARS,
             "OpenAI" => OPENAI_ENV_VARS,
             "DashScope" => DASHSCOPE_ENV_VARS,
+            "DeepSeek" => DEEPSEEK_ENV_VARS,
+            "Ollama" => OLLAMA_ENV_VARS,
+            "Qwen" => QWEN_ENV_VARS,
+            "vLLM" => VLLM_ENV_VARS,
             _ => &[],
         }
     }
@@ -437,6 +502,8 @@ impl OpenAiSseParser {
 struct StreamState {
     model: String,
     message_started: bool,
+    thinking_started: bool,
+    thinking_stopped: bool,
     text_started: bool,
     text_finished: bool,
     finished: bool,
@@ -446,10 +513,32 @@ struct StreamState {
 }
 
 impl StreamState {
+    /// When thinking is present, text starts at index 1 and tool calls shift by +2
+    /// instead of +1. When absent, text is index 0 and tools shift by +1.
+    const fn thinking_offset(&self) -> u32 {
+        if self.thinking_started {
+            1
+        } else {
+            0
+        }
+    }
+
+    const fn text_index(&self) -> u32 {
+        self.thinking_offset()
+    }
+
+    fn tool_block_index(&self, openai_index: u32) -> u32 {
+        openai_index + 1 + self.thinking_offset()
+    }
+}
+
+impl StreamState {
     fn new(model: String) -> Self {
         Self {
             model,
             message_started: false,
+            thinking_started: false,
+            thinking_stopped: false,
             text_started: false,
             text_finished: false,
             finished: false,
@@ -493,35 +582,70 @@ impl StreamState {
         }
 
         for choice in chunk.choices {
-            if let Some(content) = choice.delta.content.filter(|value| !value.is_empty()) {
-                if !self.text_started {
-                    self.text_started = true;
+            // Handle reasoning/thinking content (DeepSeek R1, Qwen thinking, etc.).
+            // Emitted before the final text content and surfaced as Thinking blocks.
+            if let Some(reasoning) = choice
+                .delta
+                .reasoning_content
+                .filter(|value| !value.is_empty())
+            {
+                if !self.thinking_started {
+                    self.thinking_started = true;
                     events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
                         index: 0,
+                        content_block: OutputContentBlock::Thinking {
+                            thinking: String::new(),
+                            signature: None,
+                        },
+                    }));
+                }
+                events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+                    index: 0,
+                    delta: ContentBlockDelta::ThinkingDelta {
+                        thinking: reasoning,
+                    },
+                }));
+            }
+
+            if let Some(content) = choice.delta.content.filter(|value| !value.is_empty()) {
+                // Transition from thinking → text: close the thinking block first.
+                if self.thinking_started && !self.thinking_stopped {
+                    self.thinking_stopped = true;
+                    events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
+                        index: 0,
+                    }));
+                }
+                if !self.text_started {
+                    self.text_started = true;
+                    let text_idx = self.text_index();
+                    events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
+                        index: text_idx,
                         content_block: OutputContentBlock::Text {
                             text: String::new(),
                         },
                     }));
                 }
                 events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
-                    index: 0,
+                    index: self.text_index(),
                     delta: ContentBlockDelta::TextDelta { text: content },
                 }));
             }
 
             for tool_call in choice.delta.tool_calls {
+                let block_index = self.tool_block_index(tool_call.index);
                 let state = self.tool_calls.entry(tool_call.index).or_default();
                 state.apply(tool_call);
-                let block_index = state.block_index();
                 if !state.started {
-                    if let Some(start_event) = state.start_event()? {
+                    if let Some(mut start_event) = state.start_event()? {
+                        start_event.index = block_index;
                         state.started = true;
                         events.push(StreamEvent::ContentBlockStart(start_event));
                     } else {
                         continue;
                     }
                 }
-                if let Some(delta_event) = state.delta_event() {
+                if let Some(mut delta_event) = state.delta_event() {
+                    delta_event.index = block_index;
                     events.push(StreamEvent::ContentBlockDelta(delta_event));
                 }
                 if choice.finish_reason.as_deref() == Some("tool_calls") && !state.stopped {
@@ -535,11 +659,12 @@ impl StreamState {
             if let Some(finish_reason) = choice.finish_reason {
                 self.stop_reason = Some(normalize_finish_reason(&finish_reason));
                 if finish_reason == "tool_calls" {
+                    let tool_offset = 1 + self.thinking_offset();
                     for state in self.tool_calls.values_mut() {
                         if state.started && !state.stopped {
                             state.stopped = true;
                             events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
-                                index: state.block_index(),
+                                index: state.openai_index + tool_offset,
                             }));
                         }
                     }
@@ -557,19 +682,32 @@ impl StreamState {
         self.finished = true;
 
         let mut events = Vec::new();
-        if self.text_started && !self.text_finished {
-            self.text_finished = true;
+
+        // Close thinking block if it was started but never stopped.
+        if self.thinking_started && !self.thinking_stopped {
+            self.thinking_stopped = true;
             events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
                 index: 0,
             }));
         }
 
+        if self.text_started && !self.text_finished {
+            self.text_finished = true;
+            events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
+                index: self.text_index(),
+            }));
+        }
+
+        let tool_offset = 1 + self.thinking_offset();
         for state in self.tool_calls.values_mut() {
+            let block_index = state.openai_index + tool_offset;
             if !state.started {
-                if let Some(start_event) = state.start_event()? {
+                if let Some(mut start_event) = state.start_event()? {
+                    start_event.index = block_index;
                     state.started = true;
                     events.push(StreamEvent::ContentBlockStart(start_event));
-                    if let Some(delta_event) = state.delta_event() {
+                    if let Some(mut delta_event) = state.delta_event() {
+                        delta_event.index = block_index;
                         events.push(StreamEvent::ContentBlockDelta(delta_event));
                     }
                 }
@@ -577,7 +715,7 @@ impl StreamState {
             if state.started && !state.stopped {
                 state.stopped = true;
                 events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
-                    index: state.block_index(),
+                    index: block_index,
                 }));
             }
         }
@@ -735,6 +873,10 @@ struct ChunkChoice {
 struct ChunkDelta {
     #[serde(default)]
     content: Option<String>,
+    /// Reasoning/thinking content emitted by models like `deepseek-reasoner`
+    /// and Qwen thinking variants before the final `content` text.
+    #[serde(default, rename = "reasoning_content")]
+    reasoning_content: Option<String>,
     #[serde(default, deserialize_with = "deserialize_null_as_empty_vec")]
     tool_calls: Vec<DeltaToolCall>,
 }
@@ -787,6 +929,8 @@ pub fn is_reasoning_model(model: &str) -> bool {
         || canonical.starts_with("o4")
         // xAI reasoning: grok-3-mini always uses reasoning mode
         || canonical == "grok-3-mini"
+        // DeepSeek reasoning: deepseek-reasoner (R1) uses fixed sampling
+        || canonical == "deepseek-reasoner"
         // Alibaba DashScope reasoning variants (QwQ + Qwen3-Thinking family)
         || canonical.starts_with("qwen-qwq")
         || canonical.starts_with("qwq")
@@ -801,7 +945,10 @@ fn strip_routing_prefix(model: &str) -> &str {
         let prefix = &model[..pos];
         // Only strip if the prefix before "/" is a known routing prefix,
         // not if "/" appears in the middle of the model name for other reasons.
-        if matches!(prefix, "openai" | "xai" | "grok" | "qwen" | "kimi") {
+        if matches!(
+            prefix,
+            "openai" | "xai" | "grok" | "qwen" | "kimi" | "deepseek" | "ollama" | "vllm"
+        ) {
             &model[pos + 1..]
         } else {
             model
@@ -1719,6 +1866,77 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_reasoner_is_reasoning_model() {
+        assert!(is_reasoning_model("deepseek-reasoner"));
+        // deepseek-chat is NOT a reasoning model
+        assert!(!is_reasoning_model("deepseek-chat"));
+        // With provider prefix
+        assert!(is_reasoning_model("deepseek/deepseek-reasoner"));
+    }
+
+    #[test]
+    fn new_config_constructors_have_correct_defaults() {
+        let ds = OpenAiCompatConfig::deepseek();
+        assert_eq!(ds.provider_name, "DeepSeek");
+        assert_eq!(ds.api_key_env, "DEEPSEEK_API_KEY");
+        assert_eq!(ds.base_url_env, "DEEPSEEK_BASE_URL");
+        assert!(ds.default_base_url.contains("api.deepseek.com"));
+
+        let ollama = OpenAiCompatConfig::ollama();
+        assert_eq!(ollama.provider_name, "Ollama");
+        assert_eq!(ollama.api_key_env, "");
+        assert!(ollama.default_base_url.contains("localhost:11434"));
+
+        let qwen = OpenAiCompatConfig::qwen();
+        assert_eq!(qwen.provider_name, "Qwen");
+        assert_eq!(qwen.api_key_env, "QWEN_API_KEY");
+        assert_eq!(qwen.default_base_url, "");
+
+        let vllm = OpenAiCompatConfig::vllm();
+        assert_eq!(vllm.provider_name, "vLLM");
+        assert_eq!(vllm.api_key_env, "");
+        assert!(vllm.default_base_url.contains("localhost:8000"));
+    }
+
+    #[test]
+    fn credential_env_vars_cover_new_providers() {
+        assert_eq!(
+            OpenAiCompatConfig::deepseek().credential_env_vars(),
+            &["DEEPSEEK_API_KEY"]
+        );
+        assert_eq!(
+            OpenAiCompatConfig::ollama().credential_env_vars(),
+            &[] as &[&str]
+        );
+        assert_eq!(
+            OpenAiCompatConfig::qwen().credential_env_vars(),
+            &["QWEN_API_KEY"]
+        );
+        assert_eq!(
+            OpenAiCompatConfig::vllm().credential_env_vars(),
+            &[] as &[&str]
+        );
+    }
+
+    #[test]
+    fn chunk_delta_parses_reasoning_content() {
+        let json = r#"{"content":"hello","reasoning_content":"let me think..."}"#;
+        let delta: super::ChunkDelta =
+            serde_json::from_str(json).expect("should parse reasoning_content");
+        assert_eq!(delta.content.as_deref(), Some("hello"));
+        assert_eq!(delta.reasoning_content.as_deref(), Some("let me think..."));
+    }
+
+    #[test]
+    fn chunk_delta_defaults_reasoning_content_to_none() {
+        let json = r#"{"content":"hello"}"#;
+        let delta: super::ChunkDelta =
+            serde_json::from_str(json).expect("should parse without reasoning_content");
+        assert_eq!(delta.content.as_deref(), Some("hello"));
+        assert!(delta.reasoning_content.is_none());
+    }
+
+    #[test]
     fn tuning_params_omitted_from_payload_when_none() {
         let request = MessageRequest {
             model: "gpt-4o".to_string(),
@@ -2195,9 +2413,16 @@ mod tests {
 
     #[test]
     fn provider_specific_size_limits_are_correct() {
-        assert_eq!(OpenAiCompatConfig::dashscope().max_request_body_bytes, 6_291_456); // 6MB
-        assert_eq!(OpenAiCompatConfig::openai().max_request_body_bytes, 104_857_600); // 100MB
-        assert_eq!(OpenAiCompatConfig::xai().max_request_body_bytes, 52_428_800); // 50MB
+        assert_eq!(
+            OpenAiCompatConfig::dashscope().max_request_body_bytes,
+            6_291_456
+        ); // 6MB
+        assert_eq!(
+            OpenAiCompatConfig::openai().max_request_body_bytes,
+            104_857_600
+        ); // 100MB
+        assert_eq!(OpenAiCompatConfig::xai().max_request_body_bytes, 52_428_800);
+        // 50MB
     }
 
     #[test]

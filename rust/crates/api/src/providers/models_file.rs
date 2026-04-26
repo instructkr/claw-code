@@ -267,6 +267,10 @@ pub fn custom_metadata_for_model(model: &str) -> Option<ProviderMetadata> {
     let (provider_kind, auth_env) = match resolved.api.as_str() {
         "anthropic-messages" => (ProviderKind::Anthropic, "ANTHROPIC_API_KEY"),
         "openai-completions" => (ProviderKind::OpenAi, "OPENAI_API_KEY"),
+        "deepseek" => (ProviderKind::DeepSeek, "DEEPSEEK_API_KEY"),
+        "ollama" => (ProviderKind::Ollama, ""),
+        "qwen" => (ProviderKind::Qwen, "QWEN_API_KEY"),
+        "vllm" => (ProviderKind::Vllm, ""),
         _ => (ProviderKind::OpenAi, "OPENAI_API_KEY"),
     };
     Some(ProviderMetadata {
@@ -475,15 +479,25 @@ mod tests {
 
         // Both providers should be present after merge
         let ollama = find_custom_model("ollama/llama3.1:8b");
-        assert!(ollama.is_some(), "user-level ollama provider should survive after project merge");
+        assert!(
+            ollama.is_some(),
+            "user-level ollama provider should survive after project merge"
+        );
         assert_eq!(ollama.unwrap().model_id, "llama3.1:8b");
 
         let local = find_custom_model("local/my-model");
-        assert!(local.is_some(), "project-level local provider should be present");
+        assert!(
+            local.is_some(),
+            "project-level local provider should be present"
+        );
         assert_eq!(local.unwrap().model_id, "my-model");
 
         let all = all_custom_models();
-        assert_eq!(all.len(), 2, "should have exactly 2 models from 2 providers");
+        assert_eq!(
+            all.len(),
+            2,
+            "should have exactly 2 models from 2 providers"
+        );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
@@ -529,7 +543,10 @@ mod tests {
 
         // User-level llama3.1:8b should NOT be present (provider was replaced)
         let old = find_custom_model("ollama/llama3.1:8b");
-        assert!(old.is_none(), "user-level ollama models should be replaced by project override");
+        assert!(
+            old.is_none(),
+            "user-level ollama models should be replaced by project override"
+        );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }

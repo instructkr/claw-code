@@ -11,6 +11,10 @@ pub enum ProviderClient {
     Anthropic(AnthropicClient),
     Xai(OpenAiCompatClient),
     OpenAi(OpenAiCompatClient),
+    DeepSeek(OpenAiCompatClient),
+    Ollama(OpenAiCompatClient),
+    Qwen(OpenAiCompatClient),
+    Vllm(OpenAiCompatClient),
 }
 
 impl ProviderClient {
@@ -62,6 +66,18 @@ impl ProviderClient {
                 };
                 Ok(Self::OpenAi(OpenAiCompatClient::from_env(config)?))
             }
+            ProviderKind::DeepSeek => Ok(Self::DeepSeek(OpenAiCompatClient::from_env(
+                OpenAiCompatConfig::deepseek(),
+            )?)),
+            ProviderKind::Ollama => Ok(Self::Ollama(OpenAiCompatClient::from_env(
+                OpenAiCompatConfig::ollama(),
+            )?)),
+            ProviderKind::Qwen => Ok(Self::Qwen(OpenAiCompatClient::from_env(
+                OpenAiCompatConfig::qwen(),
+            )?)),
+            ProviderKind::Vllm => Ok(Self::Vllm(OpenAiCompatClient::from_env(
+                OpenAiCompatConfig::vllm(),
+            )?)),
         }
     }
 
@@ -71,6 +87,10 @@ impl ProviderClient {
             Self::Anthropic(_) => ProviderKind::Anthropic,
             Self::Xai(_) => ProviderKind::Xai,
             Self::OpenAi(_) => ProviderKind::OpenAi,
+            Self::DeepSeek(_) => ProviderKind::DeepSeek,
+            Self::Ollama(_) => ProviderKind::Ollama,
+            Self::Qwen(_) => ProviderKind::Qwen,
+            Self::Vllm(_) => ProviderKind::Vllm,
         }
     }
 
@@ -86,7 +106,12 @@ impl ProviderClient {
     pub fn prompt_cache_stats(&self) -> Option<PromptCacheStats> {
         match self {
             Self::Anthropic(client) => client.prompt_cache_stats(),
-            Self::Xai(_) | Self::OpenAi(_) => None,
+            Self::Xai(_)
+            | Self::OpenAi(_)
+            | Self::DeepSeek(_)
+            | Self::Ollama(_)
+            | Self::Qwen(_)
+            | Self::Vllm(_) => None,
         }
     }
 
@@ -94,7 +119,12 @@ impl ProviderClient {
     pub fn take_last_prompt_cache_record(&self) -> Option<PromptCacheRecord> {
         match self {
             Self::Anthropic(client) => client.take_last_prompt_cache_record(),
-            Self::Xai(_) | Self::OpenAi(_) => None,
+            Self::Xai(_)
+            | Self::OpenAi(_)
+            | Self::DeepSeek(_)
+            | Self::Ollama(_)
+            | Self::Qwen(_)
+            | Self::Vllm(_) => None,
         }
     }
 
@@ -104,7 +134,12 @@ impl ProviderClient {
     ) -> Result<MessageResponse, ApiError> {
         match self {
             Self::Anthropic(client) => client.send_message(request).await,
-            Self::Xai(client) | Self::OpenAi(client) => client.send_message(request).await,
+            Self::Xai(client)
+            | Self::OpenAi(client)
+            | Self::DeepSeek(client)
+            | Self::Ollama(client)
+            | Self::Qwen(client)
+            | Self::Vllm(client) => client.send_message(request).await,
         }
     }
 
@@ -117,7 +152,12 @@ impl ProviderClient {
                 .stream_message(request)
                 .await
                 .map(MessageStream::Anthropic),
-            Self::Xai(client) | Self::OpenAi(client) => client
+            Self::Xai(client)
+            | Self::OpenAi(client)
+            | Self::DeepSeek(client)
+            | Self::Ollama(client)
+            | Self::Qwen(client)
+            | Self::Vllm(client) => client
                 .stream_message(request)
                 .await
                 .map(MessageStream::OpenAiCompat),

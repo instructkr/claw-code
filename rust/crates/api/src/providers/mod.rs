@@ -34,6 +34,10 @@ pub enum ProviderKind {
     Anthropic,
     Xai,
     OpenAi,
+    DeepSeek,
+    Ollama,
+    Qwen,
+    Vllm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +136,33 @@ const MODEL_REGISTRY: &[(&str, ProviderMetadata)] = &[
             default_base_url: openai_compat::DEFAULT_DASHSCOPE_BASE_URL,
         },
     ),
+    (
+        "deepseek-chat",
+        ProviderMetadata {
+            provider: ProviderKind::DeepSeek,
+            auth_env: "DEEPSEEK_API_KEY",
+            base_url_env: "DEEPSEEK_BASE_URL",
+            default_base_url: openai_compat::DEFAULT_DEEPSEEK_BASE_URL,
+        },
+    ),
+    (
+        "deepseek-reasoner",
+        ProviderMetadata {
+            provider: ProviderKind::DeepSeek,
+            auth_env: "DEEPSEEK_API_KEY",
+            base_url_env: "DEEPSEEK_BASE_URL",
+            default_base_url: openai_compat::DEFAULT_DEEPSEEK_BASE_URL,
+        },
+    ),
+    (
+        "deepseek-r1",
+        ProviderMetadata {
+            provider: ProviderKind::DeepSeek,
+            auth_env: "DEEPSEEK_API_KEY",
+            base_url_env: "DEEPSEEK_BASE_URL",
+            default_base_url: openai_compat::DEFAULT_DEEPSEEK_BASE_URL,
+        },
+    ),
 ];
 
 #[must_use]
@@ -158,6 +189,12 @@ pub fn resolve_model_alias(model: &str) -> String {
                     "kimi" => "kimi-k2.5",
                     _ => trimmed,
                 },
+                ProviderKind::DeepSeek => match *alias {
+                    "deepseek-chat" => "deepseek-chat",
+                    "deepseek-reasoner" | "deepseek-r1" => "deepseek-reasoner",
+                    _ => trimmed,
+                },
+                ProviderKind::Ollama | ProviderKind::Qwen | ProviderKind::Vllm => trimmed,
             })
         })
         .map_or_else(|| trimmed.to_string(), ToOwned::to_owned)
@@ -188,6 +225,15 @@ pub fn metadata_for_model(model: &str) -> Option<ProviderMetadata> {
             default_base_url: openai_compat::DEFAULT_XAI_BASE_URL,
         });
     }
+    // DeepSeek native API (deepseek-chat, deepseek-reasoner).
+    if canonical.starts_with("deepseek") {
+        return Some(ProviderMetadata {
+            provider: ProviderKind::DeepSeek,
+            auth_env: "DEEPSEEK_API_KEY",
+            base_url_env: "DEEPSEEK_BASE_URL",
+            default_base_url: openai_compat::DEFAULT_DEEPSEEK_BASE_URL,
+        });
+    }
     // Explicit provider-namespaced models (e.g. "openai/gpt-4.1-mini") must
     // route to the correct provider regardless of which auth env vars are set.
     // Without this, detect_provider_kind falls through to the auth-sniffer
@@ -200,17 +246,43 @@ pub fn metadata_for_model(model: &str) -> Option<ProviderMetadata> {
             default_base_url: openai_compat::DEFAULT_OPENAI_BASE_URL,
         });
     }
-    // Alibaba DashScope compatible-mode endpoint. Routes qwen/* and bare
-    // qwen-* model names (qwen-max, qwen-plus, qwen-turbo, qwen-qwq, etc.)
-    // to the OpenAI-compat client pointed at DashScope's /compatible-mode/v1.
-    // Uses the OpenAi provider kind because DashScope speaks the OpenAI REST
-    // shape — only the base URL and auth env var differ.
-    if canonical.starts_with("qwen/") || canonical.starts_with("qwen-") {
+    // Ollama local inference server. ollama/* prefix routes to Ollama.
+    if canonical.starts_with("ollama/") {
+        return Some(ProviderMetadata {
+            provider: ProviderKind::Ollama,
+            auth_env: "",
+            base_url_env: "OLLAMA_BASE_URL",
+            default_base_url: openai_compat::DEFAULT_OLLAMA_BASE_URL,
+        });
+    }
+    // Qwen models served outside Alibaba DashScope (local, third-party API).
+    // Use qwen/ prefix to route to the external Qwen provider.
+    // Bare qwen-* model names still route to DashScope for backward compat.
+    if canonical.starts_with("qwen/") {
+        return Some(ProviderMetadata {
+            provider: ProviderKind::Qwen,
+            auth_env: "QWEN_API_KEY",
+            base_url_env: "QWEN_BASE_URL",
+            default_base_url: "",
+        });
+    }
+    // Alibaba DashScope compatible-mode endpoint. Bare qwen-* model names
+    // (qwen-max, qwen-plus, qwen-turbo, qwen-qwq, etc.) route to DashScope.
+    if canonical.starts_with("qwen-") {
         return Some(ProviderMetadata {
             provider: ProviderKind::OpenAi,
             auth_env: "DASHSCOPE_API_KEY",
             base_url_env: "DASHSCOPE_BASE_URL",
             default_base_url: openai_compat::DEFAULT_DASHSCOPE_BASE_URL,
+        });
+    }
+    // vLLM local inference server. vllm/* prefix routes to vLLM.
+    if canonical.starts_with("vllm/") {
+        return Some(ProviderMetadata {
+            provider: ProviderKind::Vllm,
+            auth_env: "",
+            base_url_env: "VLLM_BASE_URL",
+            default_base_url: openai_compat::DEFAULT_VLLM_BASE_URL,
         });
     }
     // Kimi models (kimi-k2.5, kimi-k1.5, etc.) via DashScope compatible-mode.
@@ -252,6 +324,20 @@ pub fn detect_provider_kind(model: &str) -> ProviderKind {
     }
     if openai_compat::has_api_key("XAI_API_KEY") {
         return ProviderKind::Xai;
+    }
+    if openai_compat::has_api_key("DEEPSEEK_API_KEY") {
+        return ProviderKind::DeepSeek;
+    }
+    if openai_compat::has_api_key("QWEN_API_KEY") {
+        return ProviderKind::Qwen;
+    }
+    // Ollama: no auth required, detected by OLLAMA_BASE_URL env var.
+    if std::env::var_os("OLLAMA_BASE_URL").is_some() {
+        return ProviderKind::Ollama;
+    }
+    // vLLM: no auth required, detected by VLLM_BASE_URL env var.
+    if std::env::var_os("VLLM_BASE_URL").is_some() {
+        return ProviderKind::Vllm;
     }
     // Last resort: if OPENAI_BASE_URL is set without OPENAI_API_KEY (some
     // local providers like Ollama don't require auth), still route there.
@@ -582,28 +668,36 @@ mod tests {
         // User request from Discord #clawcode-get-help: web3g wants to use
         // Qwen 3.6 Plus via native Alibaba DashScope API (not OpenRouter,
         // which has lower rate limits). metadata_for_model must route
-        // qwen/* and bare qwen-* to the OpenAi provider kind pointed at
-        // the DashScope compatible-mode endpoint, regardless of whether
-        // ANTHROPIC_API_KEY is present in the environment.
-        let meta = super::metadata_for_model("qwen/qwen-max")
-            .expect("qwen/ prefix must resolve to DashScope metadata");
+        // bare qwen-* model names to the OpenAi provider kind pointed at
+        // the DashScope compatible-mode endpoint. The qwen/ prefix now
+        // routes to the external Qwen provider (non-DashScope).
+        // Bare qwen-* prefix routes to DashScope
+        let meta = super::metadata_for_model("qwen-plus")
+            .expect("qwen- prefix must resolve to DashScope metadata");
         assert_eq!(meta.provider, ProviderKind::OpenAi);
         assert_eq!(meta.auth_env, "DASHSCOPE_API_KEY");
         assert_eq!(meta.base_url_env, "DASHSCOPE_BASE_URL");
         assert!(meta.default_base_url.contains("dashscope.aliyuncs.com"));
 
-        // Bare qwen- prefix also routes
-        let meta2 = super::metadata_for_model("qwen-plus")
+        // qwen/ prefix now routes to external Qwen provider (non-DashScope)
+        let meta_qwen = super::metadata_for_model("qwen/qwen-max")
+            .expect("qwen/ prefix must resolve to Qwen metadata");
+        assert_eq!(meta_qwen.provider, ProviderKind::Qwen);
+        assert_eq!(meta_qwen.auth_env, "QWEN_API_KEY");
+        assert_eq!(meta_qwen.base_url_env, "QWEN_BASE_URL");
+
+        // Another bare qwen- model
+        let meta2 = super::metadata_for_model("qwen-qwq")
             .expect("qwen- prefix must resolve to DashScope metadata");
         assert_eq!(meta2.provider, ProviderKind::OpenAi);
         assert_eq!(meta2.auth_env, "DASHSCOPE_API_KEY");
 
-        // detect_provider_kind must agree even if ANTHROPIC_API_KEY is set
+        // detect_provider_kind: qwen/ prefix routes to external Qwen provider
         let kind = detect_provider_kind("qwen/qwen3-coder");
         assert_eq!(
             kind,
-            ProviderKind::OpenAi,
-            "qwen/ prefix must win over auth-sniffer order"
+            ProviderKind::Qwen,
+            "qwen/ prefix must route to Qwen provider"
         );
     }
 
@@ -778,14 +872,14 @@ mod tests {
     #[test]
     fn returns_context_window_metadata_for_kimi_models() {
         // kimi-k2.5
-        let k25_limit = model_token_limit("kimi-k2.5")
-            .expect("kimi-k2.5 should have token limit metadata");
+        let k25_limit =
+            model_token_limit("kimi-k2.5").expect("kimi-k2.5 should have token limit metadata");
         assert_eq!(k25_limit.max_output_tokens, 16_384);
         assert_eq!(k25_limit.context_window_tokens, 256_000);
 
         // kimi-k1.5
-        let k15_limit = model_token_limit("kimi-k1.5")
-            .expect("kimi-k1.5 should have token limit metadata");
+        let k15_limit =
+            model_token_limit("kimi-k1.5").expect("kimi-k1.5 should have token limit metadata");
         assert_eq!(k15_limit.max_output_tokens, 16_384);
         assert_eq!(k15_limit.context_window_tokens, 256_000);
     }
@@ -793,11 +887,13 @@ mod tests {
     #[test]
     fn kimi_alias_resolves_to_kimi_k25_token_limits() {
         // The "kimi" alias resolves to "kimi-k2.5" via resolve_model_alias()
-        let alias_limit = model_token_limit("kimi")
-            .expect("kimi alias should resolve to kimi-k2.5 limits");
-        let direct_limit = model_token_limit("kimi-k2.5")
-            .expect("kimi-k2.5 should have limits");
-        assert_eq!(alias_limit.max_output_tokens, direct_limit.max_output_tokens);
+        let alias_limit =
+            model_token_limit("kimi").expect("kimi alias should resolve to kimi-k2.5 limits");
+        let direct_limit = model_token_limit("kimi-k2.5").expect("kimi-k2.5 should have limits");
+        assert_eq!(
+            alias_limit.max_output_tokens,
+            direct_limit.max_output_tokens
+        );
         assert_eq!(
             alias_limit.context_window_tokens,
             direct_limit.context_window_tokens
@@ -1166,4 +1262,123 @@ NO_EQUALS_LINE
     // (env_lock only protects within a single binary). The detection logic
     // is covered: OPENAI_BASE_URL alone routes to OpenAi as a last-resort
     // fallback in detect_provider_kind().
+
+    #[test]
+    fn resolves_deepseek_aliases() {
+        assert_eq!(resolve_model_alias("deepseek-chat"), "deepseek-chat");
+        assert_eq!(
+            resolve_model_alias("deepseek-reasoner"),
+            "deepseek-reasoner"
+        );
+        assert_eq!(resolve_model_alias("deepseek-r1"), "deepseek-reasoner");
+        assert_eq!(resolve_model_alias("DEEPSEEK-R1"), "deepseek-reasoner");
+    }
+
+    #[test]
+    fn deepseek_model_prefix_routes_to_deepseek_provider() {
+        let meta =
+            super::metadata_for_model("deepseek-chat").expect("deepseek-chat should resolve");
+        assert_eq!(meta.provider, ProviderKind::DeepSeek);
+        assert_eq!(meta.auth_env, "DEEPSEEK_API_KEY");
+        assert_eq!(meta.base_url_env, "DEEPSEEK_BASE_URL");
+
+        let meta2 = super::metadata_for_model("deepseek-reasoner")
+            .expect("deepseek-reasoner should resolve");
+        assert_eq!(meta2.provider, ProviderKind::DeepSeek);
+    }
+
+    #[test]
+    fn ollama_provider_prefix_routes_to_ollama() {
+        let meta =
+            super::metadata_for_model("ollama/llama3.1:8b").expect("ollama/ prefix should resolve");
+        assert_eq!(meta.provider, ProviderKind::Ollama);
+        assert_eq!(meta.auth_env, "");
+        assert_eq!(meta.base_url_env, "OLLAMA_BASE_URL");
+        assert!(meta.default_base_url.contains("localhost:11434"));
+    }
+
+    #[test]
+    fn vllm_provider_prefix_routes_to_vllm() {
+        let meta = super::metadata_for_model("vllm/meta-llama/Llama-3.1-8B")
+            .expect("vllm/ prefix should resolve");
+        assert_eq!(meta.provider, ProviderKind::Vllm);
+        assert_eq!(meta.auth_env, "");
+        assert_eq!(meta.base_url_env, "VLLM_BASE_URL");
+    }
+
+    #[test]
+    fn qwen_provider_prefix_routes_to_external_qwen() {
+        // qwen/ prefix → external Qwen (non-DashScope)
+        let meta = super::metadata_for_model("qwen/qwen2.5-7b")
+            .expect("qwen/ prefix should resolve to Qwen");
+        assert_eq!(meta.provider, ProviderKind::Qwen);
+        assert_eq!(meta.auth_env, "QWEN_API_KEY");
+        assert_eq!(meta.base_url_env, "QWEN_BASE_URL");
+    }
+
+    #[test]
+    fn bare_qwen_dash_model_routes_to_dashscope() {
+        // Bare qwen-* → DashScope (backward compat, unchanged)
+        let meta = super::metadata_for_model("qwen-plus")
+            .expect("qwen- prefix should resolve to DashScope");
+        assert_eq!(meta.provider, ProviderKind::OpenAi);
+        assert_eq!(meta.auth_env, "DASHSCOPE_API_KEY");
+    }
+
+    #[test]
+    fn detect_provider_from_deepseek_api_key() {
+        let _lock = env_lock();
+        let _ds = EnvVarGuard::set("DEEPSEEK_API_KEY", Some("sk-test"));
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", None);
+        let _openai = EnvVarGuard::set("OPENAI_API_KEY", None);
+        let _xai = EnvVarGuard::set("XAI_API_KEY", None);
+
+        assert_eq!(
+            detect_provider_kind("unknown-model"),
+            ProviderKind::DeepSeek,
+            "DEEPSEEK_API_KEY should route unknown models to DeepSeek"
+        );
+    }
+
+    #[test]
+    fn detect_provider_from_ollama_base_url() {
+        let _lock = env_lock();
+        let _ollama = EnvVarGuard::set("OLLAMA_BASE_URL", Some("http://localhost:11434/v1"));
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", None);
+        let _openai = EnvVarGuard::set("OPENAI_API_KEY", None);
+        let _xai = EnvVarGuard::set("XAI_API_KEY", None);
+        let _deepseek = EnvVarGuard::set("DEEPSEEK_API_KEY", None);
+
+        assert_eq!(
+            detect_provider_kind("unknown-model"),
+            ProviderKind::Ollama,
+            "OLLAMA_BASE_URL should route to Ollama"
+        );
+    }
+
+    #[test]
+    fn detect_provider_from_vllm_base_url() {
+        let _lock = env_lock();
+        let _vllm = EnvVarGuard::set("VLLM_BASE_URL", Some("http://localhost:8000/v1"));
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", None);
+        let _openai = EnvVarGuard::set("OPENAI_API_KEY", None);
+        let _xai = EnvVarGuard::set("XAI_API_KEY", None);
+        let _ollama = EnvVarGuard::set("OLLAMA_BASE_URL", None);
+
+        assert_eq!(
+            detect_provider_kind("unknown-model"),
+            ProviderKind::Vllm,
+            "VLLM_BASE_URL should route to vLLM"
+        );
+    }
+
+    #[test]
+    fn deepseek_models_use_heuristic_max_tokens() {
+        // deepseek-chat and deepseek-reasoner don't have hardcoded limits yet;
+        // they fall through to the default heuristic in max_tokens_for_model().
+        let max_chat = max_tokens_for_model("deepseek-chat");
+        let max_reasoner = max_tokens_for_model("deepseek-reasoner");
+        assert!(max_chat > 0);
+        assert!(max_reasoner > 0);
+    }
 }
