@@ -1561,7 +1561,7 @@ fn default_permission_mode() -> PermissionMode {
         .and_then(normalize_permission_mode)
         .map(permission_mode_from_label)
         .or_else(config_permission_mode_for_current_dir)
-        .unwrap_or(PermissionMode::DangerFullAccess)
+        .unwrap_or(PermissionMode::ReadOnly)
 }
 
 fn config_permission_mode_for_current_dir() -> Option<PermissionMode> {
@@ -9342,7 +9342,7 @@ mod tests {
             CliAction::Repl {
                 model: DEFAULT_MODEL.to_string(),
                 allowed_tools: None,
-                permission_mode: PermissionMode::DangerFullAccess,
+                permission_mode: PermissionMode::ReadOnly,
                 base_commit: None,
                 reasoning_effort: None,
                 allow_broad_cwd: false,
@@ -9382,6 +9382,35 @@ mod tests {
         std::fs::remove_dir_all(root).expect("temp config root should clean up");
 
         assert_eq!(resolved, PermissionMode::WorkspaceWrite);
+    }
+
+    #[test]
+    fn default_permission_mode_falls_back_to_read_only_when_nothing_set() {
+        let _guard = env_lock();
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let config_home = root.join("config-home");
+        std::fs::create_dir_all(&cwd).expect("project dir should exist");
+        std::fs::create_dir_all(&config_home).expect("config home should exist");
+
+        let original_config_home = std::env::var("CLAW_CONFIG_HOME").ok();
+        let original_permission_mode = std::env::var("RUSTY_CLAUDE_PERMISSION_MODE").ok();
+        std::env::set_var("CLAW_CONFIG_HOME", &config_home);
+        std::env::remove_var("RUSTY_CLAUDE_PERMISSION_MODE");
+
+        let resolved = with_current_dir(&cwd, super::default_permission_mode);
+
+        match original_config_home {
+            Some(value) => std::env::set_var("CLAW_CONFIG_HOME", value),
+            None => std::env::remove_var("CLAW_CONFIG_HOME"),
+        }
+        match original_permission_mode {
+            Some(value) => std::env::set_var("RUSTY_CLAUDE_PERMISSION_MODE", value),
+            None => std::env::remove_var("RUSTY_CLAUDE_PERMISSION_MODE"),
+        }
+        std::fs::remove_dir_all(root).expect("temp config root should clean up");
+
+        assert_eq!(resolved, PermissionMode::ReadOnly);
     }
 
     #[test]
@@ -9475,7 +9504,7 @@ mod tests {
                 model: DEFAULT_MODEL.to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
-                permission_mode: PermissionMode::DangerFullAccess,
+                permission_mode: PermissionMode::ReadOnly,
                 compact: false,
                 base_commit: None,
                 reasoning_effort: None,
@@ -9566,7 +9595,7 @@ mod tests {
                 model: "claude-opus-4-6".to_string(),
                 output_format: CliOutputFormat::Json,
                 allowed_tools: None,
-                permission_mode: PermissionMode::DangerFullAccess,
+                permission_mode: PermissionMode::ReadOnly,
                 compact: false,
                 base_commit: None,
                 reasoning_effort: None,
@@ -9597,7 +9626,7 @@ mod tests {
                 model: DEFAULT_MODEL.to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
-                permission_mode: PermissionMode::DangerFullAccess,
+                permission_mode: PermissionMode::ReadOnly,
                 compact: true,
                 base_commit: None,
                 reasoning_effort: None,
@@ -9640,7 +9669,7 @@ mod tests {
                 model: "claude-opus-4-6".to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
-                permission_mode: PermissionMode::DangerFullAccess,
+                permission_mode: PermissionMode::ReadOnly,
                 compact: false,
                 base_commit: None,
                 reasoning_effort: None,
@@ -9798,7 +9827,7 @@ mod tests {
                         .map(str::to_string)
                         .collect()
                 ),
-                permission_mode: PermissionMode::DangerFullAccess,
+                permission_mode: PermissionMode::ReadOnly,
                 base_commit: None,
                 reasoning_effort: None,
                 allow_broad_cwd: false,
@@ -10370,7 +10399,7 @@ mod tests {
             CliAction::Status {
                 model: DEFAULT_MODEL.to_string(),
                 model_flag_raw: None, // #148: no --model flag passed
-                permission_mode: PermissionMode::DangerFullAccess,
+                permission_mode: PermissionMode::ReadOnly,
                 output_format: CliOutputFormat::Text,
             }
         );
@@ -10994,7 +11023,7 @@ mod tests {
                 model: DEFAULT_MODEL.to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
-                permission_mode: PermissionMode::DangerFullAccess,
+                permission_mode: PermissionMode::ReadOnly,
                 compact: false,
                 base_commit: None,
                 reasoning_effort: None,
@@ -11024,7 +11053,7 @@ mod tests {
                 model: DEFAULT_MODEL.to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
-                permission_mode: PermissionMode::DangerFullAccess,
+                permission_mode: PermissionMode::ReadOnly,
                 compact: false,
                 base_commit: None,
                 reasoning_effort: None,
