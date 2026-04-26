@@ -13,6 +13,8 @@
   ·
   <a href="./ROADMAP.md">Roadmap</a>
   ·
+  <a href="./TROUBLESHOOTING.md">Troubleshooting</a>
+  ·
   <a href="https://discord.gg/5TUQKqFWd">UltraWorkers Discord</a>
 </p>
 
@@ -212,6 +214,7 @@ Claw Code is built in the open alongside the broader UltraWorkers toolchain:
 
 We welcome contributions! Before filing an issue or pull request:
 
+- **Troubleshooting:** See [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) for common issues and recovery steps
 - **For security issues:** See [SECURITY.md](./SECURITY.md)
 - **For bug reports / features:** Check [ROADMAP.md](./ROADMAP.md) to see if it's already pinpointed
 - **How to file a pinpoint:** See [CONTRIBUTING.md](./CONTRIBUTING.md) for the exact format
