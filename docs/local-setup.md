@@ -14,7 +14,8 @@ Three artifacts live outside the repo, in the user's `$HOME`:
 
 | Artifact | Purpose |
 |---|---|
-| `~/.local/bin/cl` | Friction-killed wrapper around `claw`. Sets `OPENAI_BASE_URL` + `OPENAI_API_KEY` for the cross-machine LMStudio backend, defaults `--model openai/qwen/qwen3-coder-30b`, forwards everything else. |
+| `~/.local/bin/cl` | Friction-killed wrapper around `claw`. Sets `OPENAI_BASE_URL` + `OPENAI_API_KEY` for the cross-machine LMStudio backend; the default model lives in `~/.claw/settings.json` so it applies uniformly to `claw`, `cl`, and any subcommand. |
+| `~/.claw/settings.json` | User-level claw config. Pins the default model (currently `openai/qwen/qwen3.5-9b`). Overridden per-invocation by `--model` and per-project by `<project>/.claw.json`. |
 | `~/.local/bin/cl-web` | Launches `ttyd` wrapping `cl`, exposing the REPL at `http://localhost:7682`. |
 | `~/.config/systemd/user/cl-web.service` | User systemd unit that keeps `cl-web` alive across shell exits and reboots (with linger enabled). |
 
@@ -34,29 +35,29 @@ LMStudio defaults aren't wanted (e.g. talking to the Anthropic API).
 
 ## Files
 
+### `~/.claw/settings.json`
+
+```json
+{
+  "model": "openai/qwen/qwen3.5-9b"
+}
+```
+
+Resolved by claw's `ConfigLoader` as a User-source config. Overridden by
+project-level `.claw.json` and per-invocation `--model`. With this in
+place, the wrapper no longer needs to inject `--model`.
+
 ### `~/.local/bin/cl`
 
 ```bash
 #!/usr/bin/env bash
-# Friction-killed claw wrapper. Sets cross-machine LMStudio env defaults
-# and a default model. Override --model from the CLI to pick a different
-# model. To bypass entirely, call `claw` (the symlink to the raw binary).
+# Friction-killed claw wrapper. Sets cross-machine LMStudio env defaults.
+# Default model is in ~/.claw/settings.json (picked up uniformly by claw,
+# cl, and any subcommand). Override --model from the CLI to pick a
+# different model. To bypass entirely, call `claw` (the symlink to the raw
+# binary) with OPENAI_BASE_URL unset.
 
 set -euo pipefail
-
-needs_model=true
-for a in "$@"; do
-    case "$a" in
-        --model|--model=*)
-            needs_model=false
-            break
-            ;;
-    esac
-done
-
-if $needs_model; then
-    set -- --model openai/qwen/qwen3-coder-30b "$@"
-fi
 
 exec env \
     OPENAI_BASE_URL="${OPENAI_BASE_URL:-http://100.100.0.10:1234/v1}" \
@@ -168,17 +169,29 @@ systemctl --user stop cl-web
 systemctl --user disable cl-web
 ```
 
+## Cross-device access via Nebula
+
+To reach the REPL from another device on the Nebula tailnet, enable WSL2
+mirrored networking on the Windows host. Add `%USERPROFILE%\.wslconfig`:
+
+```ini
+[wsl2]
+networkingMode=mirrored
+```
+
+Requires Windows 11 22H2+. Apply with `wsl --shutdown` from PowerShell and
+relaunch. After that, any port bound inside WSL2 on `0.0.0.0` (which
+ttyd is) becomes reachable on every host interface, including the Nebula
+overlay address (`100.100.0.4:7682` in this setup). Localhost forwarding
+is auto-disabled in this mode — instead WSL ports show up directly on
+Windows interfaces.
+
 ## Known limitations / not-done
 
-- **Localhost-only access.** Bound to all WSL2 interfaces but only reachable
-  from the same Windows host (via localhost forwarding). To reach from a Mac
-  or iPad over the Nebula overlay, either install Nebula inside WSL2 and bind
-  ttyd to the Nebula interface, or run ttyd on the Windows host and have it
-  shell into WSL.
 - **No auth.** ttyd is unauthenticated. Fine for localhost-only; required if
   ever exposed beyond the local box. Add via `-c user:pass` in `cl-web`.
+  Especially relevant once mirrored networking is on and the REPL is
+  reachable on the Nebula overlay.
 - **Hardcoded LMStudio endpoint.** The `cl` wrapper bakes
   `http://100.100.0.10:1234/v1`. Editing the script is the override path.
   A future improvement would read the endpoint from a config file.
-- **Hardcoded default model.** Same situation as the endpoint — embedded in
-  the wrapper.
