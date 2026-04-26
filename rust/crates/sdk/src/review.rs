@@ -985,4 +985,298 @@ mod tests {
         assert_eq!(FileChangeType::Deleted.to_string(), "deleted");
         assert_eq!(FileChangeType::Renamed.to_string(), "renamed");
     }
+
+    // --- RiskClassifier edge cases ---
+
+    #[test]
+    fn classify_empty_file_list_returns_low() {
+        let classifier = RiskClassifier::new();
+        let change = ChangeRecord {
+            id: "c1".to_string(),
+            turn_id: "t1".to_string(),
+            session_id: "s1".to_string(),
+            summary: "Metadata only".to_string(),
+            files: vec![],
+            risk: RiskLevel::Low,
+            timestamp_ms: 0,
+        };
+        assert_eq!(classifier.classify(&change), RiskLevel::Low);
+    }
+
+    #[test]
+    fn classify_env_variants_as_high() {
+        let classifier = RiskClassifier::new();
+        let file = FileChange {
+            path: ".env.production".to_string(),
+            change_type: FileChangeType::Modified,
+            lines_added: 3,
+            lines_removed: 1,
+            diff_hunk: None,
+        };
+        assert_eq!(classifier.classify_file(&file), RiskLevel::High);
+    }
+
+    #[test]
+    fn classify_environment_rs_as_low_not_high() {
+        // "environment.rs" contains "env" substring but is not a credentials file
+        let classifier = RiskClassifier::new();
+        let file = FileChange {
+            path: "src/environment.rs".to_string(),
+            change_type: FileChangeType::Modified,
+            lines_added: 5,
+            lines_removed: 2,
+            diff_hunk: None,
+        };
+        // ".env" is in high_risk_paths; "src/environment.rs" does NOT contain ".env"
+        // but it does contain "env" which is a substring of ".env"...
+        // Let's check: path_lower = "src/environment.rs", high_risk = ".env"
+        // contains(".env") => false (it's "environment", not ".env")
+        assert_eq!(classifier.classify_file(&file), RiskLevel::Low);
+    }
+
+    #[test]
+    fn classify_case_insensitive_paths() {
+        let classifier = RiskClassifier::new();
+        let file = FileChange {
+            path: "SECRETS/key.PEM".to_string(),
+            change_type: FileChangeType::Modified,
+            lines_added: 1,
+            lines_removed: 1,
+            diff_hunk: None,
+        };
+        assert_eq!(classifier.classify_file(&file), RiskLevel::High);
+    }
+
+    #[test]
+    fn classify_renamed_file() {
+        let classifier = RiskClassifier::new();
+        let file = FileChange {
+            path: "src/auth/mod.rs".to_string(),
+            change_type: FileChangeType::Renamed,
+            lines_added: 0,
+            lines_removed: 0,
+            diff_hunk: None,
+        };
+        assert_eq!(classifier.classify_file(&file), RiskLevel::High);
+    }
+
+    // --- ReviewManager edge cases ---
+
+    #[test]
+    fn submit_generates_unique_sequential_ids() {
+        let mut mgr = ReviewManager::new();
+        let id1 = mgr.submit(make_change("A", "a.txt", FileChangeType::Created)).expect("submit 1");
+        let id2 = mgr.submit(make_change("B", "b.txt", FileChangeType::Created)).expect("submit 2");
+        let id3 = mgr.submit(make_change("C", "c.txt", FileChangeType::Created)).expect("submit 3");
+        assert_ne!(id1, id2);
+        assert_ne!(id2, id3);
+        assert!(id1.starts_with("chg-"));
+    }
+
+    #[test]
+    fn approve_same_change_twice_fails() {
+        let mut mgr = ReviewManager::new();
+        let id = mgr.submit(make_change("A", "a.txt", FileChangeType::Created)).expect("submit");
+        mgr.approve(&id, "alice", None).expect("first approve");
+        let result = mgr.approve(&id, "alice", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reject_nonexistent_fails() {
+        let mut mgr = ReviewManager::new();
+        let result = mgr.reject("nonexistent", "bot", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn request_changes_nonexistent_fails() {
+        let mut mgr = ReviewManager::new();
+        let result = mgr.request_changes("nonexistent", "bot", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn request_changes_then_approve_accumulates_history() {
+        let mut mgr = ReviewManager::new();
+        let id = mgr.submit(make_change("A", "a.txt", FileChangeType::Modified)).expect("submit");
+
+        mgr.request_changes(&id, "alice", Some("fix tests".to_string())).expect("request");
+        mgr.approve(&id, "alice", Some("fixed".to_string())).expect("approve");
+
+        let history = mgr.history();
+        assert_eq!(history.len(), 2);
+        assert!(history.iter().any(|d| d.decision == Decision::ChangesRequested));
+        assert!(history.iter().any(|d| d.decision == Decision::Approved));
+    }
+
+    #[test]
+    fn submit_duplicate_explicit_id_overwrites() {
+        let mut mgr = ReviewManager::new();
+        let mut change1 = make_change("First", "a.txt", FileChangeType::Created);
+        change1.id = "chg-x".to_string();
+        mgr.submit(change1).expect("submit 1");
+
+        let mut change2 = make_change("Second", "b.txt", FileChangeType::Created);
+        change2.id = "chg-x".to_string();
+        mgr.submit(change2).expect("submit 2 (overwrites)");
+
+        // Only one pending change with id "chg-x"
+        assert_eq!(mgr.all_pending().len(), 1);
+        assert_eq!(mgr.get_pending("chg-x").unwrap().summary, "Second");
+    }
+
+    #[test]
+    fn all_pending_includes_low_risk_changes() {
+        let mut mgr = ReviewManager::new();
+        let id = mgr.submit(make_change("Docs", "README.md", FileChangeType::Modified)).expect("submit");
+
+        assert_eq!(mgr.all_pending().len(), 1);
+        assert!(mgr.all_pending()[0].id == id);
+        assert!(mgr.pending_reviews().is_empty()); // Low risk doesn't trigger default gates
+    }
+
+    #[test]
+    fn batch_approve_empty_pending_returns_zero() {
+        let mut mgr = ReviewManager::new();
+        let count = mgr.batch_approve(RiskLevel::High, "bot");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn batch_approve_high_risk_with_low_max_approves_nothing() {
+        let mut mgr = ReviewManager::new();
+        mgr.submit(make_change("Auth", "src/auth/mod.rs", FileChangeType::Modified)).expect("submit");
+        mgr.submit(make_change("Secrets", ".env", FileChangeType::Modified)).expect("submit");
+
+        let count = mgr.batch_approve(RiskLevel::Low, "bot");
+        assert_eq!(count, 0);
+        assert_eq!(mgr.all_pending().len(), 2);
+    }
+
+    // --- ReviewGate with custom gates ---
+
+    #[test]
+    fn custom_low_risk_gate_with_sensitive_path() {
+        let mut mgr = ReviewManager::new();
+        mgr.add_gate(ReviewGate::new("certs", RiskLevel::Low).sensitive_path("**/*.pem"));
+
+        let change = make_change("Cert", "certs/server.pem", FileChangeType::Modified);
+        let id = mgr.submit(change).expect("submit");
+
+        // Low risk but matches *.pem sensitive path
+        assert!(mgr.requires_review(&id));
+    }
+
+    #[test]
+    fn gate_sensitive_path_no_match_does_not_trigger() {
+        // Gate only triggers for *.pem files; a .rs file shouldn't trigger it
+        let gate = ReviewGate::new("certs", RiskLevel::High).sensitive_path("**/*.pem");
+        let change = ChangeRecord {
+            id: "c1".to_string(),
+            turn_id: "t1".to_string(),
+            session_id: "s1".to_string(),
+            summary: "Rust file".to_string(),
+            files: vec![FileChange {
+                path: "src/main.rs".to_string(),
+                change_type: FileChangeType::Modified,
+                lines_added: 5,
+                lines_removed: 2,
+                diff_hunk: None,
+            }],
+            risk: RiskLevel::Low,
+            timestamp_ms: 0,
+        };
+        assert!(!gate.requires_review(&change));
+    }
+
+    // --- Glob matching edge cases ---
+
+    #[test]
+    fn glob_question_mark_matches_exactly_one_char() {
+        assert!(simple_glob_match("file?.txt", "file1.txt"));
+        assert!(!simple_glob_match("file?.txt", "file.txt"));
+        assert!(!simple_glob_match("file?.txt", "file12.txt"));
+    }
+
+    #[test]
+    fn glob_empty_patterns() {
+        assert!(simple_glob_match("", ""));
+        assert!(!simple_glob_match("", "foo"));
+        assert!(glob_matches("", ""));
+        assert!(!glob_matches("", "foo"));
+    }
+
+    #[test]
+    fn glob_exact_match_no_wildcards() {
+        assert!(simple_glob_match("README.md", "README.md"));
+        assert!(!simple_glob_match("README.md", "readme.md"));
+    }
+
+    #[test]
+    fn glob_case_sensitive() {
+        assert!(!glob_matches("**/SECRETS/**", "secrets/key.pem"));
+    }
+
+    #[test]
+    fn glob_multiple_double_star_segments() {
+        assert!(glob_matches("**/src/**/*.rs", "project/src/module/file.rs"));
+        assert!(!glob_matches("**/src/**/*.rs", "project/lib/file.rs"));
+    }
+
+    // --- Serde round-trips ---
+
+    #[test]
+    fn serde_risk_level_round_trip() {
+        for level in [RiskLevel::Low, RiskLevel::Medium, RiskLevel::High] {
+            let json = serde_json::to_string(&level).expect("serialize");
+            let parsed: RiskLevel = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(parsed, level);
+        }
+        // Default serde serialization uses PascalCase
+        assert_eq!(serde_json::to_string(&RiskLevel::High).unwrap(), "\"High\"");
+    }
+
+    #[test]
+    fn serde_decision_round_trip() {
+        for decision in [Decision::Approved, Decision::Rejected, Decision::ChangesRequested] {
+            let json = serde_json::to_string(&decision).expect("serialize");
+            let parsed: Decision = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(parsed, decision);
+        }
+    }
+
+    #[test]
+    fn serde_file_change_type_round_trip() {
+        for ct in [FileChangeType::Created, FileChangeType::Modified, FileChangeType::Deleted, FileChangeType::Renamed] {
+            let json = serde_json::to_string(&ct).expect("serialize");
+            let parsed: FileChangeType = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(parsed, ct);
+        }
+    }
+
+    #[test]
+    fn serde_review_gate_round_trip() {
+        let gate = ReviewGate {
+            name: "security".to_string(),
+            min_risk: RiskLevel::High,
+            sensitive_paths: vec!["**/*.pem".to_string(), "**/secrets/**".to_string()],
+            enabled: true,
+        };
+        let json = serde_json::to_string(&gate).expect("serialize");
+        let parsed: ReviewGate = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.name, gate.name);
+        assert_eq!(parsed.min_risk, gate.min_risk);
+        assert_eq!(parsed.sensitive_paths, gate.sensitive_paths);
+        assert_eq!(parsed.enabled, gate.enabled);
+    }
+
+    // --- Decision display ---
+
+    #[test]
+    fn decision_display() {
+        assert_eq!(Decision::Approved.to_string(), "approved");
+        assert_eq!(Decision::Rejected.to_string(), "rejected");
+        assert_eq!(Decision::ChangesRequested.to_string(), "changes_requested");
+    }
 }
