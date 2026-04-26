@@ -14,7 +14,7 @@ use crate::types::{
     ToolChoice, ToolDefinition, ToolResultContentBlock, Usage,
 };
 
-use super::{preflight_message_request, Provider, ProviderFuture};
+use super::preflight_message_request;
 
 pub const DEFAULT_XAI_BASE_URL: &str = "https://api.x.ai/v1";
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
@@ -33,6 +33,9 @@ pub struct OpenAiCompatConfig {
     pub provider_name: &'static str,
     pub api_key_env: &'static str,
     pub base_url_env: &'static str,
+    /// Optional secondary env var for base URL (checked if primary is absent).
+    /// Used by Qwen external to fall back to `OPENAI_BASE_URL`.
+    pub base_url_fallback_env: &'static str,
     pub default_base_url: &'static str,
     /// Maximum request body size in bytes. Provider-specific limits:
     /// - `DashScope`: 6MB (`6_291_456` bytes) - observed in dogfood testing
@@ -65,6 +68,7 @@ impl OpenAiCompatConfig {
             provider_name: "xAI",
             api_key_env: "XAI_API_KEY",
             base_url_env: "XAI_BASE_URL",
+            base_url_fallback_env: "",
             default_base_url: DEFAULT_XAI_BASE_URL,
             max_request_body_bytes: XAI_MAX_REQUEST_BODY_BYTES,
         }
@@ -76,6 +80,7 @@ impl OpenAiCompatConfig {
             provider_name: "OpenAI",
             api_key_env: "OPENAI_API_KEY",
             base_url_env: "OPENAI_BASE_URL",
+            base_url_fallback_env: "",
             default_base_url: DEFAULT_OPENAI_BASE_URL,
             max_request_body_bytes: OPENAI_MAX_REQUEST_BODY_BYTES,
         }
@@ -91,6 +96,7 @@ impl OpenAiCompatConfig {
             provider_name: "DashScope",
             api_key_env: "DASHSCOPE_API_KEY",
             base_url_env: "DASHSCOPE_BASE_URL",
+            base_url_fallback_env: "",
             default_base_url: DEFAULT_DASHSCOPE_BASE_URL,
             max_request_body_bytes: DASHSCOPE_MAX_REQUEST_BODY_BYTES,
         }
@@ -104,6 +110,7 @@ impl OpenAiCompatConfig {
             provider_name: "DeepSeek",
             api_key_env: "DEEPSEEK_API_KEY",
             base_url_env: "DEEPSEEK_BASE_URL",
+            base_url_fallback_env: "",
             default_base_url: DEFAULT_DEEPSEEK_BASE_URL,
             max_request_body_bytes: DEEPSEEK_MAX_REQUEST_BODY_BYTES,
         }
@@ -116,19 +123,22 @@ impl OpenAiCompatConfig {
             provider_name: "Ollama",
             api_key_env: "",
             base_url_env: "OLLAMA_BASE_URL",
+            base_url_fallback_env: "",
             default_base_url: DEFAULT_OLLAMA_BASE_URL,
             max_request_body_bytes: OLLAMA_MAX_REQUEST_BODY_BYTES,
         }
     }
 
     /// Qwen models served outside Alibaba DashScope (local, third-party API, etc.).
-    /// Configure `QWEN_API_KEY` and/or `QWEN_BASE_URL`.
+    /// Configure `QWEN_API_KEY` and/or `QWEN_BASE_URL`. Falls back to
+    /// `OPENAI_BASE_URL` if `QWEN_BASE_URL` is not set (e.g. OpenRouter).
     #[must_use]
     pub const fn qwen() -> Self {
         Self {
             provider_name: "Qwen",
             api_key_env: "QWEN_API_KEY",
             base_url_env: "QWEN_BASE_URL",
+            base_url_fallback_env: "OPENAI_BASE_URL",
             default_base_url: "",
             max_request_body_bytes: QWEN_MAX_REQUEST_BODY_BYTES,
         }
@@ -141,6 +151,7 @@ impl OpenAiCompatConfig {
             provider_name: "vLLM",
             api_key_env: "",
             base_url_env: "VLLM_BASE_URL",
+            base_url_fallback_env: "",
             default_base_url: DEFAULT_VLLM_BASE_URL,
             max_request_body_bytes: VLLM_MAX_REQUEST_BODY_BYTES,
         }
@@ -408,24 +419,6 @@ fn jitter_for_base(base: Duration) -> Duration {
     mixed ^= mixed >> 31;
     let jitter_nanos = mixed % base_nanos.saturating_add(1);
     Duration::from_nanos(jitter_nanos)
-}
-
-impl Provider for OpenAiCompatClient {
-    type Stream = MessageStream;
-
-    fn send_message<'a>(
-        &'a self,
-        request: &'a MessageRequest,
-    ) -> ProviderFuture<'a, MessageResponse> {
-        Box::pin(async move { self.send_message(request).await })
-    }
-
-    fn stream_message<'a>(
-        &'a self,
-        request: &'a MessageRequest,
-    ) -> ProviderFuture<'a, Self::Stream> {
-        Box::pin(async move { self.stream_message(request).await })
-    }
 }
 
 #[derive(Debug)]
@@ -1472,7 +1465,15 @@ pub fn has_api_key(key: &str) -> bool {
 
 #[must_use]
 pub fn read_base_url(config: OpenAiCompatConfig) -> String {
-    std::env::var(config.base_url_env).unwrap_or_else(|_| config.default_base_url.to_string())
+    std::env::var(config.base_url_env)
+        .or_else(|_| {
+            if config.base_url_fallback_env.is_empty() {
+                Err(std::env::VarError::NotPresent)
+            } else {
+                std::env::var(config.base_url_fallback_env)
+            }
+        })
+        .unwrap_or_else(|_| config.default_base_url.to_string())
 }
 
 fn chat_completions_endpoint(base_url: &str) -> String {
@@ -2436,5 +2437,30 @@ mod tests {
         assert_eq!(super::strip_routing_prefix("kimi/kimi-k2.5"), "kimi-k2.5");
         assert_eq!(super::strip_routing_prefix("kimi-k2.5"), "kimi-k2.5"); // no prefix, unchanged
         assert_eq!(super::strip_routing_prefix("kimi/kimi-k1.5"), "kimi-k1.5");
+    }
+
+    #[test]
+    fn qwen_base_url_falls_back_to_openai_base_url() {
+        let _lock = env_lock();
+        std::env::set_var("OPENAI_BASE_URL", "https://openrouter.ai/api/v1");
+        std::env::remove_var("QWEN_BASE_URL");
+
+        let url = super::read_base_url(OpenAiCompatConfig::qwen());
+        assert_eq!(url, "https://openrouter.ai/api/v1");
+
+        std::env::remove_var("OPENAI_BASE_URL");
+    }
+
+    #[test]
+    fn qwen_base_url_prefers_qwen_over_openai_fallback() {
+        let _lock = env_lock();
+        std::env::set_var("OPENAI_BASE_URL", "https://openrouter.ai/api/v1");
+        std::env::set_var("QWEN_BASE_URL", "https://qwen.example.com/v1");
+
+        let url = super::read_base_url(OpenAiCompatConfig::qwen());
+        assert_eq!(url, "https://qwen.example.com/v1");
+
+        std::env::remove_var("OPENAI_BASE_URL");
+        std::env::remove_var("QWEN_BASE_URL");
     }
 }
