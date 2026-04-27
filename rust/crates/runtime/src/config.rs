@@ -687,12 +687,12 @@ pub fn save_user_provider_settings(
     } else {
         provider.remove("baseUrl");
     }
-    if let Some(model) = model {
-        provider.insert("model".to_string(), serde_json::Value::String(model.to_string()));
-    } else {
-        provider.remove("model");
-    }
     root.insert("provider".to_string(), serde_json::Value::Object(provider));
+    if let Some(model) = model {
+        root.insert("model".to_string(), serde_json::Value::String(model.to_string()));
+    } else {
+        root.remove("model");
+    }
 
     write_settings_root(&settings_path, &root)?;
 
@@ -719,6 +719,7 @@ pub fn clear_user_provider_settings() -> Result<(), ConfigError> {
     if root.remove("provider").is_none() {
         return Ok(());
     }
+    root.remove("model");
 
     write_settings_root(&settings_path, &root)?;
 
