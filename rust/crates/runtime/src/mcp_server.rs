@@ -1,9 +1,9 @@
 //! Minimal Model Context Protocol (MCP) server.
 //!
-//! Implements a newline-safe, LSP-framed JSON-RPC server over stdio that
-//! answers `initialize`, `tools/list`, and `tools/call` requests. The framing
-//! matches the client transport implemented in [`crate::mcp_stdio`] so this
-//! server can be driven by either an external MCP client (e.g. Claude
+//! Implements a newline-delimited JSON-RPC server over stdio that answers
+//! `initialize`, `tools/list`, and `tools/call` requests. The framing matches
+//! the MCP stdio transport spec (one JSON message per line, no headers) so
+//! this server can be driven by either an external MCP client (e.g. Claude
 //! Desktop) or `claw`'s own [`McpServerManager`](crate::McpServerManager).
 //!
 //! The server is intentionally small: it exposes a list of pre-built
@@ -16,9 +16,7 @@
 use std::io;
 
 use serde_json::{json, Value as JsonValue};
-use tokio::io::{
-    stdin, stdout, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Stdin, Stdout,
-};
+use tokio::io::{stdin, stdout, AsyncBufReadExt, AsyncWriteExt, BufReader, Stdin, Stdout};
 
 use crate::mcp_stdio::{
     JsonRpcError, JsonRpcId, JsonRpcRequest, JsonRpcResponse, McpInitializeResult,
@@ -85,7 +83,7 @@ impl McpServer {
     /// callers can log and exit non-zero.
     pub async fn run(&mut self) -> io::Result<()> {
         loop {
-            let Some(payload) = read_frame(&mut self.stdin).await? else {
+            let Some(payload) = read_message(&mut self.stdin).await? else {
                 return Ok(());
             };
 
@@ -242,47 +240,24 @@ fn invalid_params_response(id: JsonRpcId, message: &str) -> JsonRpcResponse<Json
     }
 }
 
-/// Reads a single LSP-framed JSON-RPC payload from `reader`.
+/// Reads a single newline-delimited JSON-RPC payload from `reader`.
 ///
-/// Returns `Ok(None)` on clean EOF before any header bytes have been read,
+/// Returns `Ok(None)` on clean EOF before any non-blank line has been read,
 /// matching how [`crate::mcp_stdio::McpStdioProcess`] treats stream closure.
-async fn read_frame(reader: &mut BufReader<Stdin>) -> io::Result<Option<Vec<u8>>> {
-    let mut content_length: Option<usize> = None;
-    let mut first_header = true;
+/// Blank lines are skipped to tolerate defensive padding from peers.
+async fn read_message(reader: &mut BufReader<Stdin>) -> io::Result<Option<Vec<u8>>> {
     loop {
         let mut line = String::new();
         let bytes_read = reader.read_line(&mut line).await?;
         if bytes_read == 0 {
-            if first_header {
-                return Ok(None);
-            }
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "MCP stdio stream closed while reading headers",
-            ));
+            return Ok(None);
         }
-        first_header = false;
-        if line == "\r\n" || line == "\n" {
-            break;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
         }
-        let header = line.trim_end_matches(['\r', '\n']);
-        if let Some((name, value)) = header.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("Content-Length") {
-                let parsed = value
-                    .trim()
-                    .parse::<usize>()
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                content_length = Some(parsed);
-            }
-        }
+        return Ok(Some(trimmed.as_bytes().to_vec()));
     }
-
-    let content_length = content_length.ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "missing Content-Length header")
-    })?;
-    let mut payload = vec![0_u8; content_length];
-    reader.read_exact(&mut payload).await?;
-    Ok(Some(payload))
 }
 
 async fn write_response(
@@ -291,9 +266,8 @@ async fn write_response(
 ) -> io::Result<()> {
     let body = serde_json::to_vec(response)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    stdout.write_all(header.as_bytes()).await?;
     stdout.write_all(&body).await?;
+    stdout.write_all(b"\n").await?;
     stdout.flush().await
 }
 
