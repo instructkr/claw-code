@@ -18,6 +18,7 @@ pub enum ReadOutcome {
     Submit(String),
     Cancel,
     Exit,
+    ProviderSwap,
 }
 
 struct SlashCommandHelper {
@@ -86,12 +87,19 @@ impl Hinter for SlashCommandHelper {
 impl Highlighter for SlashCommandHelper {
     fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
         self.set_current_line(line);
-        Cow::Borrowed(line)
+        // When sentinel is present, show visible prompt instead of invisible char
+        if line.contains('\x01') {
+            let display = line.replace('\x01', "\x1b[36m[Provider Swap]\x1b[0m ");
+            Cow::Owned(display)
+        } else {
+            Cow::Borrowed(line)
+        }
     }
 
     fn highlight_char(&self, line: &str, _pos: usize, _kind: CmdKind) -> bool {
         self.set_current_line(line);
-        false
+        // Re-highlight when sentinel is present to show the prompt
+        line.contains('\x01')
     }
 }
 
@@ -115,6 +123,13 @@ impl LineEditor {
         editor.set_helper(Some(SlashCommandHelper::new(completions)));
         editor.bind_sequence(KeyEvent(KeyCode::Char('J'), Modifiers::CTRL), Cmd::Newline);
         editor.bind_sequence(KeyEvent(KeyCode::Enter, Modifiers::SHIFT), Cmd::Newline);
+        // Ctrl+P inserts a sentinel character that triggers provider swap.
+        // The sentinel is invisible but the highlighter shows "[Provider Swap]" prompt.
+        // User must press Enter to confirm (rustyline cannot chain commands).
+        editor.bind_sequence(
+            KeyEvent(KeyCode::Char('P'), Modifiers::CTRL),
+            Cmd::SelfInsert(1, '\x01'),
+        );
 
         Self {
             prompt: prompt.into(),
@@ -147,7 +162,14 @@ impl LineEditor {
         }
 
         match self.editor.readline(&self.prompt) {
-            Ok(line) => Ok(ReadOutcome::Submit(line)),
+            Ok(line) => {
+                // Ctrl+P inserts \x01 sentinel — triggers provider swap wizard.
+                // The sentinel is stripped and we return ProviderSwap to the REPL loop.
+                if line.contains('\x01') {
+                    return Ok(ReadOutcome::ProviderSwap);
+                }
+                Ok(ReadOutcome::Submit(line))
+            }
             Err(ReadlineError::Interrupted) => {
                 let has_input = !self.current_line().is_empty();
                 self.finish_interrupted_read()?;
