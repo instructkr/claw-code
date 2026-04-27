@@ -4,20 +4,15 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use api::{
-    ApiError, ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest, MessageResponse,
-    OutputContentBlock, ProviderClient, StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition,
-    ToolResultContentBlock, max_tokens_for_model, resolve_model_alias,
+    max_tokens_for_model, resolve_model_alias, ApiError, ContentBlockDelta, InputContentBlock,
+    InputMessage, MessageRequest, MessageResponse, OutputContentBlock, ProviderClient,
+    StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock,
 };
 use plugins::PluginTool;
 use reqwest::blocking::Client;
 use runtime::{
-    ApiClient, ApiRequest, AssistantEvent, BashCommandInput, BashCommandOutput, BranchFreshness,
-    ConfigLoader, ContentBlock, ConversationMessage, ConversationRuntime, GrepSearchInput,
-    LaneCommitProvenance, LaneEvent, LaneEventBlocker, LaneEventName, LaneEventStatus,
-    LaneFailureClass, McpDegradedReport, MessageRole, PermissionMode, PermissionPolicy,
-    PromptCacheEvent, ProviderFallbackConfig, RuntimeError, Session, TaskPacket, ToolError,
-    ToolExecutor, check_freshness, dedupe_superseded_commit_events, edit_file, execute_bash,
-    glob_search, grep_search, load_system_prompt,
+    check_freshness, dedupe_superseded_commit_events, edit_file, execute_bash, glob_search,
+    grep_search, load_system_prompt,
     lsp_client::LspRegistry,
     mcp_tool_bridge::McpToolRegistry,
     permission_enforcer::{EnforcementResult, PermissionEnforcer},
@@ -26,10 +21,15 @@ use runtime::{
     task_registry::TaskRegistry,
     team_cron_registry::{CronRegistry, TeamRegistry},
     worker_boot::{WorkerReadySnapshot, WorkerRegistry, WorkerTaskReceipt},
-    write_file,
+    write_file, ApiClient, ApiRequest, AssistantEvent, BashCommandInput, BashCommandOutput,
+    BranchFreshness, ConfigLoader, ContentBlock, ConversationMessage, ConversationRuntime,
+    GrepSearchInput, LaneCommitProvenance, LaneEvent, LaneEventBlocker, LaneEventName,
+    LaneEventStatus, LaneFailureClass, McpDegradedReport, MessageRole, PermissionMode,
+    PermissionPolicy, PromptCacheEvent, ProviderFallbackConfig, RuntimeError, Session, TaskPacket,
+    ToolError, ToolExecutor,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 /// Global task registry shared across tool invocations within a session.
 fn global_lsp_registry() -> &'static LspRegistry {
@@ -113,6 +113,10 @@ pub const IMAGE_QUALITY_TOOL_NAMES: &[&str] = &[
     "inpaint_region",
     "ImageQualityGate",
     "ImageQualityLoopPlan",
+    "ImageProviderList",
+    "ImageProfileSelect",
+    "ImageValidatorRun",
+    "ImageRegressionRun",
 ];
 
 #[derive(Debug, Clone)]
@@ -1342,6 +1346,125 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "ImageProviderList",
+            description: "List the registered image-backend provider adapters and their canonical ids.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "ImageProfileSelect",
+            description: "Resolve generation parameters and thresholds for an operating profile (exploration/production/strict or custom).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "profile": { "type": "string" },
+                    "requested_steps": { "type": "integer", "minimum": 1 },
+                    "requested_cfg": { "type": "number", "minimum": 0.0 },
+                    "requested_sampler": { "type": "string" },
+                    "requested_seeds": {
+                        "type": "array",
+                        "items": { "type": "integer", "minimum": 0 }
+                    }
+                },
+                "required": ["profile"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "ImageValidatorRun",
+            description: "Run the configured validator suite (hands/feet, symmetry, pattern, artifact, creative) and return a normalised score vector.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "image_uri": { "type": "string" },
+                    "endpoints": {
+                        "type": "object",
+                        "properties": {
+                            "hands_feet": { "type": "string" },
+                            "symmetry": { "type": "string" },
+                            "pattern": { "type": "string" },
+                            "artifact": { "type": "string" },
+                            "creative": { "type": "string" }
+                        },
+                        "additionalProperties": false
+                    },
+                    "min_confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+                    "symmetry_expectations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string" },
+                                "left_region": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 },
+                                "right_region": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 },
+                                "tolerance": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+                            },
+                            "required": ["label", "left_region", "right_region"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "pattern_regions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string" },
+                                "bbox": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 }
+                            },
+                            "required": ["label", "bbox"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "creative_intent": { "type": "string" }
+                },
+                "required": ["image_uri", "endpoints"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "ImageRegressionRun",
+            description: "Execute a regression scene pack against the configured providers/validators and emit a JSON+markdown CI summary.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "run_id": { "type": "string" },
+                    "profile": { "type": "string" },
+                    "fixtures_path": { "type": "string" },
+                    "fixtures": { "type": "array" },
+                    "validator_endpoints": {
+                        "type": "object",
+                        "properties": {
+                            "hands_feet": { "type": "string" },
+                            "symmetry": { "type": "string" },
+                            "pattern": { "type": "string" },
+                            "artifact": { "type": "string" },
+                            "creative": { "type": "string" }
+                        },
+                        "additionalProperties": false
+                    },
+                    "release_gate": {
+                        "type": "object",
+                        "properties": {
+                            "min_pass_rate": { "type": "number" },
+                            "max_catastrophic_failure_rate": { "type": "number" },
+                            "max_avg_iterations": { "type": "number" }
+                        },
+                        "additionalProperties": false
+                    },
+                    "output_path": { "type": "string" }
+                },
+                "required": ["run_id", "profile"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
             name: "MCP",
             description: "Execute a tool provided by a connected MCP server.",
             input_schema: json!({
@@ -1391,6 +1514,7 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
     execute_tool_with_enforcer(None, name, input)
 }
 
+#[allow(clippy::too_many_lines)]
 fn execute_tool_with_enforcer(
     enforcer: Option<&PermissionEnforcer>,
     name: &str,
@@ -1496,6 +1620,16 @@ fn execute_tool_with_enforcer(
         }
         "ImageQualityLoopPlan" => {
             from_value::<ImageQualityLoopPlanInput>(input).and_then(run_image_quality_loop_plan)
+        }
+        "ImageProviderList" => run_image_provider_list(),
+        "ImageProfileSelect" => {
+            from_value::<ImageProfileSelectInput>(input).and_then(run_image_profile_select)
+        }
+        "ImageValidatorRun" => {
+            from_value::<ImageValidatorRunInput>(input).and_then(run_image_validator_run)
+        }
+        "ImageRegressionRun" => {
+            from_value::<ImageRegressionRunInput>(input).and_then(run_image_regression_run)
         }
         "MCP" => from_value::<McpToolInput>(input).and_then(run_mcp_tool),
         "TestingPermission" => {
@@ -2041,8 +2175,84 @@ fn post_json_to_backend(backend_url: &str, payload: &Value) -> Result<Value, Str
         .map_err(|error| format!("backend response is not valid JSON: {error}"))
 }
 
+fn global_image_provider_registry() -> &'static image::ImageProviderRegistry {
+    use std::sync::OnceLock;
+    static REGISTRY: OnceLock<image::ImageProviderRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(image::ImageProviderRegistry::builtin)
+}
+
+fn global_image_profile_registry() -> &'static image::ProfileRegistry {
+    use std::sync::OnceLock;
+    static REGISTRY: OnceLock<image::ProfileRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(image::ProfileRegistry::builtin)
+}
+
+fn canonical_generate_request_from_input(
+    input: &GenerateImageInput,
+) -> image::CanonicalGenerationRequest {
+    let control_inputs = input
+        .control_inputs
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| image::CanonicalControlInput {
+            control_type: c.control_type,
+            uri: c.uri,
+            strength: c.strength,
+        })
+        .collect();
+    image::CanonicalGenerationRequest {
+        prompt: input.prompt.clone(),
+        negative_prompt: input.negative_prompt.clone(),
+        width: input.width,
+        height: input.height,
+        steps: input.steps,
+        cfg: input.cfg,
+        seed: input.seed,
+        sampler: input.sampler.clone(),
+        model: input.model.clone(),
+        batch_size: input.batch_size,
+        style_preset: input.style_preset.clone(),
+        control_inputs,
+    }
+}
+
+fn canonical_inpaint_request_from_input(
+    input: &InpaintRegionInput,
+) -> image::CanonicalInpaintRequest {
+    image::CanonicalInpaintRequest {
+        image_uri: input.image_uri.clone(),
+        mask_uri: input.mask_uri.clone(),
+        prompt: input.prompt.clone(),
+        negative_prompt: input.negative_prompt.clone(),
+        denoise_strength: input.denoise_strength,
+        steps: input.steps,
+        cfg: input.cfg,
+        seed: input.seed,
+        model: input.model.clone(),
+        preserve_edges: input.preserve_edges,
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn run_generate_image(input: GenerateImageInput) -> Result<String, String> {
+    if let Some(provider_id) = input.provider.clone() {
+        let canonical = canonical_generate_request_from_input(&input);
+        let registry = global_image_provider_registry();
+        let invocation =
+            registry.translate_generate(&provider_id, &input.backend_url, &canonical)?;
+        let raw = post_json_to_backend(&invocation.endpoint, &invocation.payload)?;
+        let parsed = registry.parse_response(&provider_id, &raw)?;
+        return to_pretty_json(json!({
+            "tool": "generate_image",
+            "provider": provider_id,
+            "endpoint": invocation.endpoint,
+            "images": parsed.images,
+            "metadata": parsed.metadata,
+            "raw": raw
+        }));
+    }
+
     let payload = serde_json::to_value(&input).map_err(|error| error.to_string())?;
     let backend = input.backend_url.clone();
     let result = post_json_to_backend(&backend, &payload)?;
@@ -2091,6 +2301,23 @@ fn run_check_pattern_consistency(input: CheckPatternConsistencyInput) -> Result<
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_inpaint_region(input: InpaintRegionInput) -> Result<String, String> {
+    if let Some(provider_id) = input.provider.clone() {
+        let canonical = canonical_inpaint_request_from_input(&input);
+        let registry = global_image_provider_registry();
+        let invocation =
+            registry.translate_inpaint(&provider_id, &input.backend_url, &canonical)?;
+        let raw = post_json_to_backend(&invocation.endpoint, &invocation.payload)?;
+        let parsed = registry.parse_response(&provider_id, &raw)?;
+        return to_pretty_json(json!({
+            "tool": "inpaint_region",
+            "provider": provider_id,
+            "endpoint": invocation.endpoint,
+            "images": parsed.images,
+            "metadata": parsed.metadata,
+            "raw": raw
+        }));
+    }
+
     let payload = serde_json::to_value(&input).map_err(|error| error.to_string())?;
     let backend = input.backend_url.clone();
     let result = post_json_to_backend(&backend, &payload)?;
@@ -2204,6 +2431,153 @@ fn run_image_quality_loop_plan(input: ImageQualityLoopPlanInput) -> Result<Strin
         "next_iteration": input.iteration + 1,
         "repairs": repairs,
         "repair_count": repairs.len()
+    }))
+}
+
+fn run_image_provider_list() -> Result<String, String> {
+    let registry = global_image_provider_registry();
+    let names = registry.names();
+    let providers: Vec<Value> = names
+        .iter()
+        .map(|name| match name.as_str() {
+            "comfyui" => json!({
+                "id": name,
+                "description": "Local ComfyUI graph endpoint (POSTs `/prompt` workflow JSON)",
+                "endpoints": {"generate": "/prompt", "inpaint": "/prompt"}
+            }),
+            "diffusers" => json!({
+                "id": name,
+                "description": "Self-hosted Diffusers REST service (SDXL pipeline kwargs)",
+                "endpoints": {"generate": "/v1/text-to-image", "inpaint": "/v1/inpaint"}
+            }),
+            "internal_worker" => json!({
+                "id": name,
+                "description": "Internal image-render worker with queued task envelope",
+                "endpoints": {"generate": "/jobs/generate", "inpaint": "/jobs/inpaint"}
+            }),
+            _ => json!({"id": name, "description": "user-registered provider"}),
+        })
+        .collect();
+    to_pretty_json(json!({
+        "tool": "ImageProviderList",
+        "providers": providers,
+        "count": names.len()
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_image_profile_select(input: ImageProfileSelectInput) -> Result<String, String> {
+    let registry = global_image_profile_registry();
+    let resolved = registry.resolve(
+        &input.profile,
+        image::profile::ResolveParams {
+            requested_steps: input.requested_steps,
+            requested_cfg: input.requested_cfg,
+            requested_sampler: input.requested_sampler,
+            requested_seeds: input.requested_seeds,
+        },
+    )?;
+    to_pretty_json(json!({
+        "tool": "ImageProfileSelect",
+        "profile": resolved.profile_name,
+        "thresholds": {
+            "anatomy": resolved.thresholds.anatomy,
+            "symmetry": resolved.thresholds.symmetry,
+            "pattern": resolved.thresholds.pattern,
+            "artifact": resolved.thresholds.artifact,
+            "creative": resolved.thresholds.creative,
+            "weighted_total": resolved.thresholds.weighted_total
+        },
+        "params": {
+            "steps": resolved.steps,
+            "cfg": resolved.cfg,
+            "sampler": resolved.sampler,
+            "seeds": resolved.seeds,
+            "max_iterations": resolved.max_iterations,
+            "requires_symmetry": resolved.requires_symmetry,
+            "requires_pattern": resolved.requires_pattern
+        },
+        "warnings": resolved.warnings
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_image_validator_run(input: ImageValidatorRunInput) -> Result<String, String> {
+    let endpoints: image::validator::ValidatorEndpoints = input.endpoints.into();
+    let invoker: std::sync::Arc<dyn image::HttpInvoker> =
+        std::sync::Arc::new(image::provider::ReqwestInvoker::default());
+    let stage = image::ValidatorStage::new(endpoints, invoker);
+    let request = image::validator::ValidatorRequest {
+        image_uri: input.image_uri,
+        min_confidence: input.min_confidence,
+        symmetry_expectations: input.symmetry_expectations,
+        pattern_regions: input.pattern_regions,
+        creative_intent: input.creative_intent,
+    };
+    let report = stage.run(&request)?;
+    to_pretty_json(json!({
+        "tool": "ImageValidatorRun",
+        "scores": {
+            "anatomy_score": report.scores.anatomy_score,
+            "symmetry_score": report.scores.symmetry_score,
+            "pattern_score": report.scores.pattern_score,
+            "artifact_score": report.scores.artifact_score,
+            "creative_score": report.scores.creative_score,
+            "weighted_total": report.scores.weighted_total()
+        },
+        "anatomy_issues": report.anatomy_issues,
+        "symmetry_violations": report.symmetry_violations,
+        "pattern_violations": report.pattern_violations,
+        "artifact_issues": report.artifact_issues,
+        "raw_responses": report.raw_responses
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_image_regression_run(input: ImageRegressionRunInput) -> Result<String, String> {
+    let fixtures = match (input.fixtures.clone(), input.fixtures_path.as_deref()) {
+        (Some(fixtures), _) => fixtures,
+        (None, Some(path)) => image::regression::load_fixtures(Path::new(path))?,
+        (None, None) => {
+            return Err(
+                "ImageRegressionRun requires either `fixtures` or `fixtures_path`".to_string(),
+            );
+        }
+    };
+    let providers = global_image_provider_registry();
+    let profiles = global_image_profile_registry();
+    let endpoints: image::validator::ValidatorEndpoints = input.validator_endpoints.into();
+    let invoker: std::sync::Arc<dyn image::HttpInvoker> =
+        std::sync::Arc::new(image::provider::ReqwestInvoker::default());
+    let validator = image::ValidatorStage::new(endpoints, invoker.clone());
+
+    let report = image::regression::RegressionRun {
+        run_id: input.run_id.clone(),
+        profile: input.profile.clone(),
+        fixtures,
+        providers,
+        profiles,
+        validator: &validator,
+        generator: invoker,
+        release_gate: input.release_gate,
+    }
+    .execute()?;
+
+    if let Some(path) = &input.output_path {
+        let payload = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
+        std::fs::write(path, payload).map_err(|e| e.to_string())?;
+    }
+
+    let json_value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+    to_pretty_json(json!({
+        "tool": "ImageRegressionRun",
+        "run_id": report.run_id,
+        "profile": report.profile,
+        "summary": json_value.get("summary"),
+        "outcomes": json_value.get("outcomes"),
+        "thresholds": json_value.get("thresholds"),
+        "markdown": report.markdown,
+        "output_path": input.output_path
     }))
 }
 
@@ -2928,7 +3302,7 @@ struct RemoteTriggerInput {
     body: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 struct ControlInput {
     #[serde(rename = "type")]
     control_type: String,
@@ -2954,6 +3328,12 @@ struct GenerateImageInput {
     style_preset: Option<String>,
     #[serde(default)]
     control_inputs: Option<Vec<ControlInput>>,
+    /// Optional provider adapter id (`comfyui` / `diffusers` / `internal_worker`).
+    /// When set, the canonical payload is translated through the adapter and
+    /// the response is normalised before being returned. When unset, the
+    /// payload is forwarded verbatim to `backend_url`.
+    #[serde(default)]
+    provider: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -3014,6 +3394,9 @@ struct InpaintRegionInput {
     model: String,
     #[serde(default)]
     preserve_edges: Option<bool>,
+    /// Optional provider adapter id; see `GenerateImageInput::provider`.
+    #[serde(default)]
+    provider: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -3045,6 +3428,75 @@ struct ImageQualityLoopPlanInput {
     pattern_violations: Vec<String>,
     #[serde(default)]
     artifact_issues: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ImageProfileSelectInput {
+    profile: String,
+    #[serde(default)]
+    requested_steps: Option<u32>,
+    #[serde(default)]
+    requested_cfg: Option<f64>,
+    #[serde(default)]
+    requested_sampler: Option<String>,
+    #[serde(default)]
+    requested_seeds: Option<Vec<u64>>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Default)]
+struct ValidatorEndpointsInput {
+    #[serde(default)]
+    hands_feet: Option<String>,
+    #[serde(default)]
+    symmetry: Option<String>,
+    #[serde(default)]
+    pattern: Option<String>,
+    #[serde(default)]
+    artifact: Option<String>,
+    #[serde(default)]
+    creative: Option<String>,
+}
+
+impl From<ValidatorEndpointsInput> for image::validator::ValidatorEndpoints {
+    fn from(value: ValidatorEndpointsInput) -> Self {
+        Self {
+            hands_feet: value.hands_feet,
+            symmetry: value.symmetry,
+            pattern: value.pattern,
+            artifact: value.artifact,
+            creative: value.creative,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ImageValidatorRunInput {
+    image_uri: String,
+    endpoints: ValidatorEndpointsInput,
+    #[serde(default)]
+    min_confidence: Option<f64>,
+    #[serde(default)]
+    symmetry_expectations: Vec<image::validator::SymmetryExpectation>,
+    #[serde(default)]
+    pattern_regions: Vec<image::validator::PatternRegion>,
+    #[serde(default)]
+    creative_intent: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ImageRegressionRunInput {
+    run_id: String,
+    profile: String,
+    #[serde(default)]
+    fixtures_path: Option<String>,
+    #[serde(default)]
+    fixtures: Option<Vec<image::regression::RegressionFixture>>,
+    #[serde(default)]
+    validator_endpoints: ValidatorEndpointsInput,
+    #[serde(default)]
+    release_gate: Option<image::regression::ReleaseGate>,
+    #[serde(default)]
+    output_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6630,6 +7082,7 @@ fn parse_skill_description(contents: &str) -> Option<String> {
     None
 }
 
+pub mod image;
 pub mod lane_completion;
 pub mod pdf_extract;
 
@@ -6647,18 +7100,18 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        AgentInput, AgentJob, GlobalToolRegistry, LaneEventName, LaneFailureClass,
-        ProviderRuntimeClient, SubagentToolExecutor, agent_permission_policy,
-        allowed_tools_for_subagent, classify_lane_failure, derive_agent_state,
-        execute_agent_with_spawn, execute_tool, extract_recovery_outcome, final_assistant_text,
-        global_cron_registry, maybe_commit_provenance, mvp_tool_specs, permission_mode_from_plugin,
-        persist_agent_terminal_state, push_output_block, run_task_packet,
+        agent_permission_policy, allowed_tools_for_subagent, classify_lane_failure,
+        derive_agent_state, execute_agent_with_spawn, execute_tool, extract_recovery_outcome,
+        final_assistant_text, global_cron_registry, maybe_commit_provenance, mvp_tool_specs,
+        permission_mode_from_plugin, persist_agent_terminal_state, push_output_block,
+        run_task_packet, AgentInput, AgentJob, GlobalToolRegistry, LaneEventName, LaneFailureClass,
+        ProviderRuntimeClient, SubagentToolExecutor,
     };
     use api::OutputContentBlock;
     use runtime::ProviderFallbackConfig;
     use runtime::{
-        ApiRequest, AssistantEvent, ConversationRuntime, PermissionMode, PermissionPolicy,
-        RuntimeError, Session, TaskPacket, ToolExecutor, permission_enforcer::PermissionEnforcer,
+        permission_enforcer::PermissionEnforcer, ApiRequest, AssistantEvent, ConversationRuntime,
+        PermissionMode, PermissionPolicy, RuntimeError, Session, TaskPacket, ToolExecutor,
     };
     use serde_json::json;
 
@@ -7471,11 +7924,9 @@ mod tests {
             .expect_err("subagent write tool should be denied before dispatch");
 
         // then
-        assert!(
-            error
-                .to_string()
-                .contains("requires workspace-write permission")
-        );
+        assert!(error
+            .to_string()
+            .contains("requires workspace-write permission"));
     }
 
     #[test]
@@ -7636,12 +8087,10 @@ mod tests {
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
         assert_eq!(output["url"], format!("http://{}/plain", server.addr()));
-        assert!(
-            output["result"]
-                .as_str()
-                .expect("result")
-                .contains("plain text response")
-        );
+        assert!(output["result"]
+            .as_str()
+            .expect("result")
+            .contains("plain text response"));
 
         let error = execute_tool(
             "WebFetch",
@@ -7939,18 +8388,14 @@ mod tests {
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
         assert_eq!(output["skill"], "help");
-        assert!(
-            output["path"]
-                .as_str()
-                .expect("path")
-                .ends_with("/help/SKILL.md")
-        );
-        assert!(
-            output["prompt"]
-                .as_str()
-                .expect("prompt")
-                .contains("Guide on using oh-my-codex plugin")
-        );
+        assert!(output["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("/help/SKILL.md"));
+        assert!(output["prompt"]
+            .as_str()
+            .expect("prompt")
+            .contains("Guide on using oh-my-codex plugin"));
 
         let dollar_result = execute_tool(
             "Skill",
@@ -7962,12 +8407,10 @@ mod tests {
         let dollar_output: serde_json::Value =
             serde_json::from_str(&dollar_result).expect("valid json");
         assert_eq!(dollar_output["skill"], "$help");
-        assert!(
-            dollar_output["path"]
-                .as_str()
-                .expect("path")
-                .ends_with("/help/SKILL.md")
-        );
+        assert!(dollar_output["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("/help/SKILL.md"));
 
         if let Some(home) = original_home {
             std::env::set_var("HOME", home);
@@ -8003,23 +8446,19 @@ mod tests {
             .expect("project-local skill should resolve");
         let skill_output: serde_json::Value =
             serde_json::from_str(&skill_result).expect("valid json");
-        assert!(
-            skill_output["path"]
-                .as_str()
-                .expect("path")
-                .ends_with(".claw/skills/plan/SKILL.md")
-        );
+        assert!(skill_output["path"]
+            .as_str()
+            .expect("path")
+            .ends_with(".claw/skills/plan/SKILL.md"));
 
         let command_result = execute_tool("Skill", &json!({ "skill": "/handoff" }))
             .expect("legacy command should resolve");
         let command_output: serde_json::Value =
             serde_json::from_str(&command_result).expect("valid json");
-        assert!(
-            command_output["path"]
-                .as_str()
-                .expect("path")
-                .ends_with(".claw/commands/handoff.md")
-        );
+        assert!(command_output["path"]
+            .as_str()
+            .expect("path")
+            .ends_with(".claw/commands/handoff.md"));
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
         fs::remove_dir_all(root).expect("temp project should clean up");
@@ -8054,12 +8493,10 @@ mod tests {
             .expect("project-local skill should resolve");
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
-        assert!(
-            output["path"]
-                .as_str()
-                .expect("path")
-                .ends_with(".claude/skills/trace/SKILL.md")
-        );
+        assert!(output["path"]
+            .as_str()
+            .expect("path")
+            .ends_with(".claude/skills/trace/SKILL.md"));
         assert_eq!(output["description"], "Project-local trace helper");
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
@@ -8118,19 +8555,15 @@ mod tests {
         let omc_output: serde_json::Value = serde_json::from_str(&omc_result).expect("valid json");
         let agents_output: serde_json::Value =
             serde_json::from_str(&agents_result).expect("valid json");
-        assert!(
-            omc_output["path"]
-                .as_str()
-                .expect("path")
-                .ends_with(".omc/skills/hud/SKILL.md")
-        );
+        assert!(omc_output["path"]
+            .as_str()
+            .expect("path")
+            .ends_with(".omc/skills/hud/SKILL.md"));
         assert_eq!(omc_output["description"], "Project-local OMC HUD helper");
-        assert!(
-            agents_output["path"]
-                .as_str()
-                .expect("path")
-                .ends_with(".agents/skills/trace/SKILL.md")
-        );
+        assert!(agents_output["path"]
+            .as_str()
+            .expect("path")
+            .ends_with(".agents/skills/trace/SKILL.md"));
         assert_eq!(
             agents_output["description"],
             "Project-local agents compatibility helper"
@@ -8182,12 +8615,10 @@ mod tests {
             .expect("learned skill should resolve");
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
-        assert!(
-            output["path"]
-                .as_str()
-                .expect("path")
-                .ends_with("skills/omc-learned/learned/SKILL.md")
-        );
+        assert!(output["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("skills/omc-learned/learned/SKILL.md"));
         assert_eq!(output["description"], "Learned OMC skill");
 
         match original_home {
@@ -8243,24 +8674,20 @@ mod tests {
             execute_tool("Skill", &json!({ "skill": "statusline" })).expect("direct skill");
         let direct_skill_output: serde_json::Value =
             serde_json::from_str(&direct_skill).expect("valid skill json");
-        assert!(
-            direct_skill_output["path"]
-                .as_str()
-                .expect("path")
-                .ends_with("skills/statusline/SKILL.md")
-        );
+        assert!(direct_skill_output["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("skills/statusline/SKILL.md"));
         assert_eq!(direct_skill_output["description"], "Claude config skill");
 
         let legacy_command =
             execute_tool("Skill", &json!({ "skill": "doctor-check" })).expect("direct command");
         let legacy_command_output: serde_json::Value =
             serde_json::from_str(&legacy_command).expect("valid command json");
-        assert!(
-            legacy_command_output["path"]
-                .as_str()
-                .expect("path")
-                .ends_with("commands/doctor-check.md")
-        );
+        assert!(legacy_command_output["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("commands/doctor-check.md"));
         assert_eq!(
             legacy_command_output["description"],
             "Claude config command"
@@ -8314,12 +8741,10 @@ mod tests {
             .expect("legacy command markdown should resolve");
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
-        assert!(
-            output["path"]
-                .as_str()
-                .expect("path")
-                .ends_with(".claude/commands/team.md")
-        );
+        assert!(output["path"]
+            .as_str()
+            .expect("path")
+            .ends_with(".claude/commands/team.md"));
         assert_eq!(output["description"], "Legacy team workflow");
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
@@ -9102,18 +9527,16 @@ mod tests {
             final_assistant_text(&summary),
             "Scope: completed mock review"
         );
-        assert!(
-            runtime
-                .session()
-                .messages
-                .iter()
-                .flat_map(|message| message.blocks.iter())
-                .any(|block| matches!(
-                    block,
-                    runtime::ContentBlock::ToolResult { output, .. }
-                        if output.contains("hello from child")
-                ))
-        );
+        assert!(runtime
+            .session()
+            .messages
+            .iter()
+            .flat_map(|message| message.blocks.iter())
+            .any(|block| matches!(
+                block,
+                runtime::ContentBlock::ToolResult { output, .. }
+                    if output.contains("hello from child")
+            )));
 
         let _ = std::fs::remove_file(path);
     }
@@ -9277,24 +9700,20 @@ mod tests {
             .expect("bash failure should still return structured output");
         let failure_output: serde_json::Value = serde_json::from_str(&failure).expect("json");
         assert_eq!(failure_output["returnCodeInterpretation"], "exit_code:7");
-        assert!(
-            failure_output["stderr"]
-                .as_str()
-                .expect("stderr")
-                .contains("oops")
-        );
+        assert!(failure_output["stderr"]
+            .as_str()
+            .expect("stderr")
+            .contains("oops"));
 
         let timeout = execute_tool("bash", &json!({ "command": "sleep 1", "timeout": 10 }))
             .expect("bash timeout should return output");
         let timeout_output: serde_json::Value = serde_json::from_str(&timeout).expect("json");
         assert_eq!(timeout_output["interrupted"], true);
         assert_eq!(timeout_output["returnCodeInterpretation"], "timeout");
-        assert!(
-            timeout_output["stderr"]
-                .as_str()
-                .expect("stderr")
-                .contains("Command exceeded timeout")
-        );
+        assert!(timeout_output["stderr"]
+            .as_str()
+            .expect("stderr")
+            .contains("Command exceeded timeout"));
 
         let background = execute_tool(
             "bash",
@@ -9335,12 +9754,10 @@ mod tests {
             output_json["returnCodeInterpretation"],
             "preflight_blocked:branch_divergence"
         );
-        assert!(
-            output_json["stderr"]
-                .as_str()
-                .expect("stderr")
-                .contains("branch divergence detected before workspace tests")
-        );
+        assert!(output_json["stderr"]
+            .as_str()
+            .expect("stderr")
+            .contains("branch divergence detected before workspace tests"));
         assert_eq!(
             output_json["structuredContent"][0]["event"],
             "branch.stale_against_main"
@@ -9524,12 +9941,10 @@ mod tests {
             .expect("glob should succeed");
         let globbed_output: serde_json::Value = serde_json::from_str(&globbed).expect("json");
         assert_eq!(globbed_output["numFiles"], 1);
-        assert!(
-            globbed_output["filenames"][0]
-                .as_str()
-                .expect("filename")
-                .ends_with("nested/lib.rs")
-        );
+        assert!(globbed_output["filenames"][0]
+            .as_str()
+            .expect("filename")
+            .ends_with("nested/lib.rs"));
 
         let glob_error = execute_tool("glob_search", &json!({ "pattern": "[" }))
             .expect_err("invalid glob should fail");
@@ -9553,12 +9968,10 @@ mod tests {
         assert_eq!(grep_content_output["numFiles"], 0);
         assert!(grep_content_output["appliedLimit"].is_null());
         assert_eq!(grep_content_output["appliedOffset"], 1);
-        assert!(
-            grep_content_output["content"]
-                .as_str()
-                .expect("content")
-                .contains("let alpha = 2;")
-        );
+        assert!(grep_content_output["content"]
+            .as_str()
+            .expect("content")
+            .contains("let alpha = 2;"));
 
         let grep_count = execute_tool(
             "grep_search",
@@ -9587,12 +10000,10 @@ mod tests {
         let elapsed = started.elapsed();
         let output: serde_json::Value = serde_json::from_str(&result).expect("json");
         assert_eq!(output["duration_ms"], 20);
-        assert!(
-            output["message"]
-                .as_str()
-                .expect("message")
-                .contains("Slept for 20ms")
-        );
+        assert!(output["message"]
+            .as_str()
+            .expect("message")
+            .contains("Slept for 20ms"));
         assert!(elapsed >= Duration::from_millis(15));
     }
 
@@ -9760,12 +10171,11 @@ mod tests {
         let local_settings = std::fs::read_to_string(cwd.join(".claw").join("settings.local.json"))
             .expect("local settings after exit");
         assert!(local_settings.contains(r#""defaultMode": "acceptEdits""#));
-        assert!(
-            !cwd.join(".claw")
-                .join("tool-state")
-                .join("plan-mode.json")
-                .exists()
-        );
+        assert!(!cwd
+            .join(".claw")
+            .join("tool-state")
+            .join("plan-mode.json")
+            .exists());
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
         match original_home {
@@ -9822,12 +10232,11 @@ mod tests {
             None,
             "permissions override should be removed on exit"
         );
-        assert!(
-            !cwd.join(".claw")
-                .join("tool-state")
-                .join("plan-mode.json")
-                .exists()
-        );
+        assert!(!cwd
+            .join(".claw")
+            .join("tool-state")
+            .join("plan-mode.json")
+            .exists());
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
         match original_home {
@@ -9984,8 +10393,8 @@ printf 'pwsh:%s' "$1"
     }
 
     fn read_only_registry() -> super::GlobalToolRegistry {
-        use runtime::PermissionPolicy;
         use runtime::permission_enforcer::PermissionEnforcer;
+        use runtime::PermissionPolicy;
 
         let policy = mvp_tool_specs().into_iter().fold(
             PermissionPolicy::new(runtime::PermissionMode::ReadOnly),
@@ -10270,29 +10679,26 @@ printf 'pwsh:%s' "$1"
             let addr = listener.local_addr().expect("local addr");
             let (tx, rx) = std::sync::mpsc::channel::<()>();
 
-            let handle = thread::spawn(move || {
-                loop {
-                    if rx.try_recv().is_ok() {
-                        break;
-                    }
+            let handle = thread::spawn(move || loop {
+                if rx.try_recv().is_ok() {
+                    break;
+                }
 
-                    match listener.accept() {
-                        Ok((mut stream, _)) => {
-                            let mut buffer = [0_u8; 4096];
-                            let size = stream.read(&mut buffer).expect("read request");
-                            let request = String::from_utf8_lossy(&buffer[..size]).into_owned();
-                            let request_line =
-                                request.lines().next().unwrap_or_default().to_string();
-                            let response = handler(&request_line);
-                            stream
-                                .write_all(response.to_bytes().as_slice())
-                                .expect("write response");
-                        }
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            thread::sleep(Duration::from_millis(10));
-                        }
-                        Err(error) => panic!("server accept failed: {error}"),
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buffer = [0_u8; 4096];
+                        let size = stream.read(&mut buffer).expect("read request");
+                        let request = String::from_utf8_lossy(&buffer[..size]).into_owned();
+                        let request_line = request.lines().next().unwrap_or_default().to_string();
+                        let response = handler(&request_line);
+                        stream
+                            .write_all(response.to_bytes().as_slice())
+                            .expect("write response");
                     }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("server accept failed: {error}"),
                 }
             });
 

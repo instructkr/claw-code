@@ -193,7 +193,7 @@ cargo test --workspace
 - [`rust/MOCK_PARITY_HARNESS.md`](./rust/MOCK_PARITY_HARNESS.md) — deterministic mock-service harness details
 - [`ROADMAP.md`](./ROADMAP.md) — active roadmap and open cleanup work
 - [`PHILOSOPHY.md`](./PHILOSOPHY.md) — why the project exists and how it is operated
-- [`IMAGE_QUALITY_HARNESS_SPEC.md`](./IMAGE_QUALITY_HARNESS_SPEC.md) — concrete tool/schema/loop spec for constrained image generation
+- [`IMAGE_QUALITY_HARNESS_SPEC.md`](./IMAGE_QUALITY_HARNESS_SPEC.md) — concrete tool/schema/loop spec for constrained image generation. The Spec §10 implementation lives in `rust/crates/tools/src/image/` (provider adapters, validator stage, profile registry, regression runner) and is exposed via the `ImageProviderList`, `ImageProfileSelect`, `ImageValidatorRun`, and `ImageRegressionRun` tools alongside the existing `generate_image`/`inpaint_region`/`ImageQualityGate`/`ImageQualityLoopPlan` set.
 
 ## Ecosystem
 
