@@ -240,6 +240,13 @@ impl GlobalToolRegistry {
             }
         }
 
+        if allowed.is_empty() {
+            return Err(format!(
+                "--allowedTools was provided with no usable tool names (got `{}`). Omit the flag to allow all tools.",
+                values.join(" ")
+            ));
+        }
+
         Ok(Some(allowed))
     }
 
@@ -6971,6 +6978,21 @@ mod tests {
         let empty_permission =
             permission_mode_from_plugin("").expect_err("empty plugin permission should fail");
         assert!(empty_permission.contains("unsupported plugin permission: "));
+    }
+
+    #[test]
+    fn allowed_tools_rejects_empty_token_lists() {
+        let registry = GlobalToolRegistry::builtin();
+
+        for raw in ["", ",,", "   "] {
+            let err = registry
+                .normalize_allowed_tools(&[raw.to_string()])
+                .expect_err("empty allow-list input should be rejected");
+            assert!(
+                err.contains("--allowedTools was provided with no usable tool names"),
+                "unexpected error for {raw:?}: {err}"
+            );
+        }
     }
 
     #[test]

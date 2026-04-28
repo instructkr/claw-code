@@ -119,6 +119,31 @@ impl Default for RuntimeFeatureConfig {
     }
 }
 
+/// Controls which external AI coding framework rules are auto-imported
+/// into the system prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum RulesImportConfig {
+    /// Auto-import from all supported frameworks (Cursor, Copilot, Windsurf, Aider)
+    Auto,
+    /// No auto-import — only .claw/rules/ and CLAUDE.md files are loaded
+    None,
+    /// Import only from the listed frameworks
+    List(Vec<String>),
+    #[default]
+    /// Default: auto-import all detected frameworks
+    Default,
+}
+
+impl RulesImportConfig {
+    pub fn should_import(&self, framework: &str) -> bool {
+        match self {
+            Self::Auto | Self::Default => true,
+            Self::None => false,
+            Self::List(frameworks) => frameworks.iter().any(|f| f.eq_ignore_ascii_case(framework)),
+        }
+    }
+}
+
 /// Stored provider configuration from the setup wizard.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RuntimeProviderConfig {
@@ -146,8 +171,7 @@ impl RuntimeProviderConfig {
 
     #[must_use]
     pub fn model(&self) -> Option<&str> {
-        self.model.as_deref()
-    }
+        self.model.as_deref()    }
 }
 
 /// Ordered chain of fallback model identifiers used when the primary
@@ -406,7 +430,6 @@ impl ConfigLoader {
                 .and_then(JsonValue::as_bool)
                 .unwrap_or(true),
             api_timeout: parse_optional_api_timeout_config(&merged_value)?,        };
-
         Ok(RuntimeConfig {
             merged,
             loaded_entries,
@@ -517,8 +540,7 @@ impl RuntimeConfig {
 
     #[must_use]
     pub fn lsp_auto_start(&self) -> bool {
-        self.feature_config.lsp_auto_start
-    }
+        self.feature_config.lsp_auto_start    }
 }
 
 impl RuntimeFeatureConfig {
@@ -1142,6 +1164,34 @@ fn parse_optional_trusted_roots(root: &JsonValue) -> Result<Vec<String>, ConfigE
     )
 }
 
+
+fn parse_optional_rules_import(root: &JsonValue) -> Result<RulesImportConfig, ConfigError> {
+    let Some(object) = root.as_object() else {
+        return Ok(RulesImportConfig::Default);
+    };
+    let Some(value) = object.get("rulesImport") else {
+        return Ok(RulesImportConfig::Default);
+    };
+    match value {
+        JsonValue::String(s) => match s.as_str() {
+            "auto" => Ok(RulesImportConfig::Auto),
+            "none" => Ok(RulesImportConfig::None),
+            other => Err(ConfigError::Parse(format!(
+                r#"merged settings.rulesImport: expected "auto", "none", or an array, got "{other}""#
+            ))),
+        },
+        JsonValue::Array(arr) => {
+            let frameworks: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect();
+            Ok(RulesImportConfig::List(frameworks))
+        }
+        _ => Err(ConfigError::Parse(format!(
+            r#"merged settings.rulesImport: expected "auto", "none", or an array"#
+        ))),
+    }
+}
 fn parse_filesystem_mode_label(value: &str) -> Result<FilesystemIsolationMode, ConfigError> {
     match value {
         "off" => Ok(FilesystemIsolationMode::Off),
