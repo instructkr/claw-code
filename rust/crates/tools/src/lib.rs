@@ -1699,11 +1699,12 @@ fn run_team_create(input: TeamCreateInput) -> Result<String, String> {
     let team_dir = output_dir.join("teams");
     std::fs::create_dir_all(&team_dir).map_err(|e| e.to_string())?;
 
-    // Expand mode preset into tasks, or use manual tasks
+    // Expand mode preset into tasks, or use manual tasks.
+    // Default to "2x" when neither mode nor tasks are provided.
     let tasks = if let Some(mode) = &input.mode {
         expand_team_mode(mode, input.prompt.as_deref().unwrap_or("Explore the codebase and report findings"))?
     } else if input.tasks.is_empty() {
-        return Err("either 'mode' or 'tasks' must be provided".to_string());
+        expand_team_mode("2x", input.prompt.as_deref().unwrap_or("Explore the codebase and report findings"))?
     } else {
         input.tasks.clone()
     };
