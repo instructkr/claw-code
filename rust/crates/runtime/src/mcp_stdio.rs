@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -8,7 +9,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::time::timeout;
 
 use crate::config::{McpTransport, RuntimeConfig, ScopedMcpServerConfig};
@@ -1148,12 +1149,24 @@ pub struct McpStdioProcess {
 
 impl McpStdioProcess {
     pub fn spawn(transport: &McpStdioTransport) -> io::Result<Self> {
+        Self::spawn_with_logging(transport, None)
+    }
+
+    pub fn spawn_with_logging(
+        transport: &McpStdioTransport,
+        server_name: Option<&str>,
+    ) -> io::Result<Self> {
+        let verbose = mcp_stderr_is_verbose();
         let mut command = Command::new(&transport.command);
         command
             .args(&transport.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stderr(if verbose {
+                Stdio::inherit()
+            } else {
+                Stdio::piped()
+            });
         apply_env(&mut command, &transport.env);
 
         let mut child = command.spawn()?;
@@ -1165,6 +1178,13 @@ impl McpStdioProcess {
             .stdout
             .take()
             .ok_or_else(|| io::Error::other("stdio MCP process missing stdout pipe"))?;
+
+        if !verbose {
+            if let Some(stderr) = child.stderr.take() {
+                let log_path = server_name.and_then(mcp_stderr_log_path);
+                tokio::spawn(drain_mcp_stderr(stderr, log_path));
+            }
+        }
 
         Ok(Self {
             child,
@@ -1336,7 +1356,9 @@ impl McpStdioProcess {
 
 pub fn spawn_mcp_stdio_process(bootstrap: &McpClientBootstrap) -> io::Result<McpStdioProcess> {
     match &bootstrap.transport {
-        McpClientTransport::Stdio(transport) => McpStdioProcess::spawn(transport),
+        McpClientTransport::Stdio(transport) => {
+            McpStdioProcess::spawn_with_logging(transport, Some(&bootstrap.server_name))
+        }
         other => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
@@ -1345,6 +1367,69 @@ pub fn spawn_mcp_stdio_process(bootstrap: &McpClientBootstrap) -> io::Result<Mcp
             ),
         )),
     }
+}
+
+const MCP_VERBOSE_ENV: &str = "CLAW_MCP_VERBOSE";
+const MCP_LOG_DISABLED_ENV: &str = "CLAW_MCP_LOG_DISABLED";
+
+fn mcp_stderr_is_verbose() -> bool {
+    std::env::var_os(MCP_VERBOSE_ENV).is_some_and(|value| !value.is_empty())
+}
+
+fn mcp_stderr_log_path(server_name: &str) -> Option<PathBuf> {
+    if cfg!(test) || std::env::var_os(MCP_LOG_DISABLED_ENV).is_some_and(|v| !v.is_empty()) {
+        return None;
+    }
+    Some(
+        crate::config::default_config_home()
+            .join("logs")
+            .join(format!("mcp-{}.stderr", sanitize_for_filename(server_name))),
+    )
+}
+
+fn sanitize_for_filename(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "unnamed".to_string()
+    } else {
+        sanitized
+    }
+}
+
+async fn drain_mcp_stderr(stderr: ChildStderr, log_path: Option<PathBuf>) {
+    let mut reader = BufReader::new(stderr).lines();
+    let mut log_writer = match log_path {
+        Some(ref path) => open_mcp_stderr_log(path).await,
+        None => None,
+    };
+    while let Ok(Some(line)) = reader.next_line().await {
+        if let Some(file) = log_writer.as_mut() {
+            let _ = file.write_all(line.as_bytes()).await;
+            let _ = file.write_all(b"\n").await;
+            let _ = file.flush().await;
+        }
+    }
+}
+
+async fn open_mcp_stderr_log(path: &Path) -> Option<tokio::fs::File> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await.ok()?;
+    }
+    tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await
+        .ok()
 }
 
 fn apply_env(command: &mut Command, env: &BTreeMap<String, String>) {
