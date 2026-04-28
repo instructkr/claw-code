@@ -577,7 +577,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "Agent",
-            description: "Launch a background agent task that runs asynchronously. For synchronous read-only exploration, use SubAgent instead. Agent is for long-running background work that should not block the conversation.",
+            description: "Launch a specialized agent task. Use subagent_type to select the agent role: Explore (read-only search), Plan (explore + todo), Verification (explore + bash + todo), or general-purpose (full access). The agent uses subagentModel from settings if set, otherwise the default model.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -4004,11 +4004,22 @@ fn build_agent_system_prompt(subagent_type: &str) -> Result<Vec<String>, String>
 }
 
 fn resolve_agent_model(model: Option<&str>) -> String {
-    model
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-        .unwrap_or(DEFAULT_AGENT_MODEL)
-        .to_string()
+    if let Some(m) = model.map(str::trim).filter(|m| !m.is_empty()) {
+        return m.to_string();
+    }
+    if let Some(fast) = load_subagent_model_from_config() {
+        return fast;
+    }
+    DEFAULT_AGENT_MODEL.to_string()
+}
+
+fn load_subagent_model_from_config() -> Option<String> {
+    std::env::current_dir().ok().and_then(|cwd| {
+        ConfigLoader::default_for(&cwd)
+            .load()
+            .ok()
+            .and_then(|config| config.subagent_model().map(|m| m.to_string()))
+    })
 }
 
 fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {

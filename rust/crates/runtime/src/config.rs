@@ -547,7 +547,13 @@ impl RuntimeConfig {
 
     #[must_use]
     pub fn lsp_auto_start(&self) -> bool {
-        self.feature_config.lsp_auto_start    }
+        self.feature_config.lsp_auto_start
+    }
+
+    #[must_use]
+    pub fn subagent_model(&self) -> Option<&str> {
+        self.feature_config.subagent_model.as_deref()
+    }
 }
 
 impl RuntimeFeatureConfig {

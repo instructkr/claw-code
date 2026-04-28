@@ -228,11 +228,11 @@ fn prompt_fast_model(
     main_model: Option<&str>,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
     println!();
-    println!("  [1mFast Model (for SubAgent delegation)[0m");
-    println!("    A smaller/cheaper model used by the SubAgent tool for");
-    println!("    autonomous multi-step tasks like code search and file reading.");
-    println!("    This saves tokens by delegating information-gathering to a fast model.");
-    println!("    Press Enter to skip (SubAgent will use your main model).");
+    println!("  [1mFast Model (for Agent subtasks)[0m");
+    println!("    A smaller/cheaper model used by the Agent tool when spawning");
+    println!("    Explore, Plan, or Verification sub-agents. This saves tokens");
+    println!("    by using a fast model for information-gathering tasks.");
+    println!("    Press Enter to skip (agents will use your main model).");
 
     let current_fast = load_current_settings_field("subagentModel");
     let default_hint = current_fast
