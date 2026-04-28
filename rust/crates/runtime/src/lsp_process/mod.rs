@@ -11,13 +11,17 @@ use std::path::Path;
 use serde_json::Value as JsonValue;
 
 use crate::lsp_client::{
-    LspCompletionItem, LspDiagnostic, LspHoverResult, LspLocation, LspServerStatus, LspSymbol,
+    LspCodeAction, LspCodeLens, LspCompletionItem, LspDiagnostic, LspHoverResult, LspLocation,
+    LspRenameResult, LspServerStatus, LspSignatureHelpResult, LspSymbol,
 };
 use crate::lsp_transport::{LspTransport, LspTransportError};
 
 use parse::{
-    canonicalize_root, language_id_for_path, parse_completions, parse_hover, parse_locations,
-    parse_symbols, path_to_uri, severity_name, text_document_position_params, uri_to_path,
+    canonicalize_root, language_id_for_path, parse_code_actions, parse_code_lens,
+    parse_completions, parse_hover, parse_locations, parse_signature_help,
+    parse_symbols, parse_workspace_edit, parse_workspace_symbols, path_to_uri,
+    rename_params, severity_name, text_document_position_params, uri_to_path,
+    workspace_symbol_params,
 };
 
 #[derive(Debug)]
@@ -69,6 +73,7 @@ impl LspProcess {
         let params = serde_json::json!({
             "processId": pid,
             "rootUri": root_uri,
+            "workspaceFolders": [{ "uri": root_uri, "name": "root" }],
             "capabilities": {
                 "textDocument": {
                     "hover": { "contentFormat": ["markdown", "plaintext"] },
@@ -78,7 +83,30 @@ impl LspProcess {
                         "completionItem": { "snippetSupport": false }
                     },
                     "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
-                    "publishDiagnostics": { "relatedInformation": true }
+                    "publishDiagnostics": { "relatedInformation": true },
+                    "codeAction": {
+                        "codeActionLiteralSupport": {
+                            "codeActionKind": {
+                                "valueSet": [
+                                    "", "quickfix", "refactor", "refactor.extract",
+                                    "refactor.inline", "refactor.rewrite", "source",
+                                    "source.organizeImports"
+                                ]
+                            }
+                        }
+                    },
+                    "rename": { "prepareSupport": true },
+                    "signatureHelp": {
+                        "signatureInformation": {
+                            "documentationFormat": ["markdown", "plaintext"],
+                            "parameterInformation": { "labelOffsetSupport": true }
+                        }
+                    },
+                    "codeLens": {}
+                },
+                "workspace": {
+                    "symbol": {},
+                    "workspaceFolders": true
                 }
             }
         });
@@ -341,6 +369,145 @@ impl LspProcess {
         Ok(())
     }
 
+
+    /// Notify the server that a file was closed. Sends `textDocument/didClose`.
+    pub async fn did_close(&mut self, path: &str) -> Result<(), LspProcessError> {
+        if !self.open_files.contains(path) {
+            return Ok(());
+        }
+        let uri = path_to_uri(path);
+        let params = serde_json::json!({
+            "textDocument": { "uri": uri }
+        });
+        self.transport
+            .send_notification("textDocument/didClose", Some(params))
+            .await
+            .map_err(LspProcessError::Transport)?;
+        self.open_files.remove(path);
+        self.version_counter.remove(path);
+        Ok(())
+    }
+
+    /// Request code actions (quick fixes, refactors) for a range in a file.
+    pub async fn code_action(
+        &mut self,
+        path: &str,
+        line: u32,
+        character: u32,
+        end_line: Option<u32>,
+        end_character: Option<u32>,
+        only_kinds: Option<&[String]>,
+    ) -> Result<Vec<LspCodeAction>, LspProcessError> {
+        let uri = path_to_uri(path);
+        let el = end_line.unwrap_or(line);
+        let ec = end_character.unwrap_or(character);
+        let mut params = serde_json::json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": line, "character": character },
+                "end": { "line": el, "character": ec }
+            },
+            "context": { "diagnostics": [] }
+        });
+        if let Some(kinds) = only_kinds {
+            params["context"]["only"] = serde_json::json!(kinds);
+        }
+        let response = self
+            .transport
+            .send_request("textDocument/codeAction", Some(params))
+            .await
+            .map_err(LspProcessError::Transport)?;
+        let result = response
+            .into_result()
+            .map_err(|e| LspProcessError::Transport(LspTransportError::JsonRpc(e)))?;
+        Ok(parse_code_actions(&result))
+    }
+
+    /// Rename a symbol at a position across the workspace.
+    pub async fn rename(
+        &mut self,
+        path: &str,
+        line: u32,
+        character: u32,
+        new_name: &str,
+    ) -> Result<LspRenameResult, LspProcessError> {
+        let uri = path_to_uri(path);
+        let params = rename_params(&uri, line, character, new_name);
+        let response = self
+            .transport
+            .send_request("textDocument/rename", Some(params))
+            .await
+            .map_err(LspProcessError::Transport)?;
+        let result = response
+            .into_result()
+            .map_err(|e| LspProcessError::Transport(LspTransportError::JsonRpc(e)))?;
+        let edit = parse_workspace_edit(&result);
+        Ok(LspRenameResult {
+            new_name: new_name.to_owned(),
+            edit,
+        })
+    }
+
+    /// Get signature help at a position (function signatures, parameters).
+    pub async fn signature_help(
+        &mut self,
+        path: &str,
+        line: u32,
+        character: u32,
+    ) -> Result<Option<LspSignatureHelpResult>, LspProcessError> {
+        let uri = path_to_uri(path);
+        let params = text_document_position_params(&uri, line, character);
+        let response = self
+            .transport
+            .send_request("textDocument/signatureHelp", Some(params))
+            .await
+            .map_err(LspProcessError::Transport)?;
+        let result = response
+            .into_result()
+            .map_err(|e| LspProcessError::Transport(LspTransportError::JsonRpc(e)))?;
+        if result.is_null() {
+            return Ok(None);
+        }
+        Ok(parse_signature_help(&result))
+    }
+
+    /// Get code lens items for a file (actionable inline hints).
+    pub async fn code_lens(&mut self, path: &str) -> Result<Vec<LspCodeLens>, LspProcessError> {
+        let uri = path_to_uri(path);
+        let params = serde_json::json!({
+            "textDocument": { "uri": uri }
+        });
+        let response = self
+            .transport
+            .send_request("textDocument/codeLens", Some(params))
+            .await
+            .map_err(LspProcessError::Transport)?;
+        let result = response
+            .into_result()
+            .map_err(|e| LspProcessError::Transport(LspTransportError::JsonRpc(e)))?;
+        if result.is_null() {
+            return Ok(Vec::new());
+        }
+        Ok(parse_code_lens(&result))
+    }
+
+    /// Search for symbols across the entire workspace.
+    pub async fn workspace_symbols(
+        &mut self,
+        query: &str,
+    ) -> Result<Vec<LspSymbol>, LspProcessError> {
+        let params = workspace_symbol_params(query);
+        let response = self
+            .transport
+            .send_request("workspace/symbol", Some(params))
+            .await
+            .map_err(LspProcessError::Transport)?;
+        let result = response
+            .into_result()
+            .map_err(|e| LspProcessError::Transport(LspTransportError::JsonRpc(e)))?;
+        Ok(parse_workspace_symbols(&result))
+    }
+
     /// Drain queued server notifications and extract `publishDiagnostics`.
     #[allow(clippy::redundant_closure_for_method_calls)]
     pub fn drain_diagnostics(&mut self) -> Vec<LspDiagnostic> {
@@ -415,6 +582,7 @@ impl LspProcess {
 pub enum LspProcessError {
     Transport(LspTransportError),
     InvalidPath(String),
+    InvalidRequest(String),
 }
 
 impl std::fmt::Display for LspProcessError {
@@ -422,6 +590,7 @@ impl std::fmt::Display for LspProcessError {
         match self {
             Self::Transport(e) => write!(f, "LSP transport error: {e}"),
             Self::InvalidPath(p) => write!(f, "invalid path: {p}"),
+            Self::InvalidRequest(msg) => write!(f, "invalid request: {msg}"),
         }
     }
 }
@@ -430,7 +599,7 @@ impl std::error::Error for LspProcessError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Transport(e) => Some(e),
-            Self::InvalidPath(_) => None,
+            Self::InvalidPath(_) | Self::InvalidRequest(_) => None,
         }
     }
 }

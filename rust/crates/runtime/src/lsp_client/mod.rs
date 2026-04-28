@@ -9,8 +9,10 @@ mod tests;
 mod tests_lifecycle;
 
 pub use types::{
-    LspAction, LspCompletionItem, LspDiagnostic, LspHoverResult, LspLocation, LspServerState,
-    LspServerStatus, LspSymbol,
+    LspAction, LspCodeAction, LspCodeLens, LspCommand, LspCompletionItem, LspDiagnostic,
+    LspFileEdit, LspHoverResult, LspLocation, LspParameterInfo, LspRenameResult,
+    LspServerState, LspServerStatus, LspSignatureHelpResult, LspSignatureInformation,
+    LspSymbol, LspTextEdit, LspWorkspaceEdit,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -144,6 +146,12 @@ impl LspRegistry {
             "cpp" | "hpp" | "cc" => "cpp",
             "rb" => "ruby",
             "lua" => "lua",
+            "html" | "htm" => "html",
+            "css" | "scss" | "less" | "sass" => "css",
+            "json" | "jsonc" => "json",
+            "sh" | "bash" | "zsh" => "bash",
+            "yaml" | "yml" => "yaml",
+            "gd" => "gdscript",
             _ => return None,
         };
 
@@ -167,6 +175,12 @@ impl LspRegistry {
             "cpp" | "hpp" | "cc" => "cpp",
             "rb" => "ruby",
             "lua" => "lua",
+            "html" | "htm" => "html",
+            "css" | "scss" | "less" | "sass" => "css",
+            "json" | "jsonc" => "json",
+            "sh" | "bash" | "zsh" => "bash",
+            "yaml" | "yml" => "yaml",
+            "gd" => "gdscript",
             _ => return None,
         };
 
@@ -433,6 +447,39 @@ impl LspRegistry {
         diagnostics
     }
 
+
+    /// Notify the LSP server that a file was closed.
+    /// Best-effort: returns empty vec if no server is available.
+    pub fn notify_file_close(&self, path: &str) -> Vec<LspDiagnostic> {
+        let Some(language) = Self::language_for_path(path) else {
+            return Vec::new();
+        };
+
+        let process_arc = {
+            let inner = self.inner.lock().expect("lsp registry lock poisoned");
+            match inner.servers.get(&language).and_then(|e| e.process.clone()) {
+                Some(p) => p,
+                None => return Vec::new(),
+            }
+        };
+
+        if let Ok(mut process) = process_arc.lock() {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            if let Ok(rt) = rt {
+                let _ = rt.block_on(process.did_close(path));
+            }
+        }
+
+        // Mark file as closed
+        {
+            let mut inner = self.inner.lock().expect("lsp registry lock poisoned");
+            inner.open_files.remove(path);
+        }
+
+        Vec::new()
+    }
     /// Fetch diagnostics for a file by draining pending server notifications
     /// and returning cached diagnostics.
     pub fn fetch_diagnostics_for_file(&self, path: &str) -> Vec<LspDiagnostic> {

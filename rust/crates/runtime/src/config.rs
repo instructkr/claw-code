@@ -79,7 +79,6 @@ impl Default for ApiTimeoutConfig {
         }
     }
 }
-
 /// Structured feature configuration consumed by runtime subsystems.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeFeatureConfig {
@@ -97,8 +96,7 @@ pub struct RuntimeFeatureConfig {
     trusted_roots: Vec<String>,
     provider: RuntimeProviderConfig,
     lsp: BTreeMap<String, LspServerConfig>,
-    api_timeout: ApiTimeoutConfig,
-}
+    api_timeout: ApiTimeoutConfig,}
 
 impl Default for RuntimeFeatureConfig {
     fn default() -> Self {
@@ -117,8 +115,7 @@ impl Default for RuntimeFeatureConfig {
             trusted_roots: Vec::new(),
             provider: RuntimeProviderConfig::default(),
             lsp: BTreeMap::new(),
-            api_timeout: ApiTimeoutConfig::default(),
-        }
+            api_timeout: ApiTimeoutConfig::default(),        }
     }
 }
 
@@ -408,8 +405,7 @@ impl ConfigLoader {
                 .and_then(|o| o.get("lspAutoStart"))
                 .and_then(JsonValue::as_bool)
                 .unwrap_or(true),
-            api_timeout: parse_optional_api_timeout_config(&merged_value)?,
-        };
+            api_timeout: parse_optional_api_timeout_config(&merged_value)?,        };
 
         Ok(RuntimeConfig {
             merged,

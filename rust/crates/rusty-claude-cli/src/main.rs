@@ -3481,8 +3481,7 @@ fn run_resume_command(
         | SlashCommand::OutputStyle { .. }
         | SlashCommand::AddDir { .. }
         | SlashCommand::Lsp { .. }
-        | SlashCommand::Setup => Err("unsupported resumed slash command".into()),
-    }
+        | SlashCommand::Setup => Err("unsupported resumed slash command".into()),    }
 }
 
 /// Detect if the current working directory is "broad" (home directory or

@@ -1,6 +1,7 @@
 //! LSP action dispatch: routes actions to the appropriate server process.
 
 use super::types::{LspAction, LspServerStatus};
+use crate::lsp_process::LspProcessError;
 
 impl super::LspRegistry {
     /// Dispatch an LSP action and return a structured result.
@@ -42,15 +43,41 @@ impl super::LspRegistry {
         }
 
         // For other actions, we need a connected server for the given file
-        let path = path.ok_or("path is required for this LSP action")?;
-        let language = Self::language_for_path(path)
-            .ok_or_else(|| format!("no LSP server available for path: {path}"))?;
+        // (workspace_symbols operates without a specific file path)
+        let language = if lsp_action == LspAction::WorkspaceSymbols {
+            // Try to find any connected server for workspace symbols
+            let inner = self.inner.lock().expect("lsp registry lock poisoned");
+            inner.servers.keys().next().cloned()
+                .ok_or_else(|| "no LSP servers available for workspace symbols".to_owned())?
+        } else {
+            let p = path.ok_or("path is required for this LSP action")?;
+            Self::language_for_path(p)
+                .ok_or_else(|| format!("no LSP server available for path: {p}"))?
+        };
+        let path = path.unwrap_or("");
 
         // Check the entry exists
         {
             let inner = self.inner.lock().expect("lsp registry lock poisoned");
             if !inner.servers.contains_key(&language) {
                 return Err(format!("no LSP server available for path: {path}"));
+            }
+        }
+
+        // Check if the server is already in a non-starting state
+        {
+            let inner = self.inner.lock().expect("lsp registry lock poisoned");
+            if let Some(entry) = inner.servers.get(&language) {
+                if entry.state.status == LspServerStatus::Disconnected
+                    || entry.state.status == LspServerStatus::Error
+                {
+                    if entry.process.is_none() {
+                        return Err(format!(
+                            "LSP server for '{}' is not connected (status: {})",
+                            language, entry.state.status
+                        ));
+                    }
+                }
             }
         }
 
@@ -212,6 +239,80 @@ impl super::LspRegistry {
                             "language": language,
                             "status": "ok",
                             "edits": text_edits,
+                        }))
+                    }
+                    LspAction::CodeAction => {
+                        let end_line = if line > 0 { Some(line) } else { None };
+                        let end_character = if character > 0 { Some(character) } else { None };
+                        let actions = process.code_action(path, line, character, end_line, end_character, None).await;
+                        actions.map(|acts| serde_json::json!({
+                            "action": "code_action",
+                            "path": path,
+                            "line": 0,
+                            "character": 0,
+                            "end_line": end_line,
+                            "end_character": end_character,
+                            "language": language,
+                            "status": "ok",
+                            "actions": acts,
+                        }))
+                    }
+                    LspAction::Rename => {
+                        let new_name = _query.ok_or_else(|| LspProcessError::InvalidRequest("new_name required for rename".into()))?;
+                        let rename_result = process.rename(path, line, character, new_name).await;
+                        rename_result.map(|r| serde_json::json!({
+                            "action": "rename",
+                            "path": path,
+                            "line": line,
+                            "character": character,
+                            "language": language,
+                            "status": "ok",
+                            "result": r,
+                        }))
+                    }
+                    LspAction::SignatureHelp => {
+                        let sig = process.signature_help(path, line, character).await;
+                        sig.map(|opt| {
+                            opt.map_or_else(
+                                || serde_json::json!({
+                                    "action": "signature_help",
+                                    "path": path,
+                                    "line": line,
+                                    "character": character,
+                                    "language": language,
+                                    "status": "no_result",
+                                }),
+                                |s| serde_json::json!({
+                                    "action": "signature_help",
+                                    "path": path,
+                                    "line": line,
+                                    "character": character,
+                                    "language": language,
+                                    "status": "ok",
+                                    "result": s,
+                                }),
+                            )
+                        })
+                    }
+                    LspAction::CodeLens => {
+                        let lenses = process.code_lens(path).await;
+                        lenses.map(|l| serde_json::json!({
+                            "action": "code_lens",
+                            "path": path,
+                            "language": language,
+                            "status": "ok",
+                            "lenses": l,
+                        }))
+                    }
+                    LspAction::WorkspaceSymbols => {
+                        let query = _query.unwrap_or("");
+                        let symbols = process.workspace_symbols(query).await;
+                        symbols.map(|syms| serde_json::json!({
+                            "action": "workspace_symbols",
+                            "language": language,
+                            "query": query,
+                            "status": "ok",
+                            "symbols": syms,
                         }))
                     }
                     LspAction::Diagnostics => unreachable!(),

@@ -309,3 +309,140 @@ pub(super) fn completion_kind_name(kind: u64) -> String {
         _ => format!("Unknown({kind})"),
     }
 }
+
+
+#[allow(clippy::cast_possible_truncation)]
+pub(super) fn parse_code_actions(value: &JsonValue) -> Vec<crate::lsp_client::LspCodeAction> {
+    let Some(items) = value.as_array() else {
+        return Vec::new();
+    };
+    items.iter().filter_map(|item| {
+        // Code actions can be Command or CodeAction objects; we only parse CodeAction
+        let title = item.get("title")?.as_str()?.to_owned();
+        let kind = item.get("kind").and_then(JsonValue::as_str).map(str::to_owned);
+        let is_preferred = item.get("isPreferred").and_then(JsonValue::as_bool).unwrap_or(false);
+        let edit = item.get("edit").and_then(|e| parse_workspace_edit(e));
+        let command = item.get("command").and_then(parse_command);
+        Some(crate::lsp_client::LspCodeAction { title, kind, is_preferred, edit, command })
+    }).collect()
+}
+
+pub(super) fn parse_workspace_edit(value: &JsonValue) -> Option<crate::lsp_client::LspWorkspaceEdit> {
+    let changes = if let Some(changes_map) = value.get("changes").and_then(JsonValue::as_object) {
+        changes_map.iter().filter_map(|(uri, edits)| {
+            let path = uri_to_path(uri);
+            let edit_list = edits.as_array()?;
+            let text_edits: Vec<crate::lsp_client::LspTextEdit> = edit_list.iter().filter_map(|e| {
+                let new_text = e.get("newText")?.as_str()?.to_owned();
+                let range = e.get("range")?;
+                let start = range.get("start")?;
+                let end = range.get("end")?;
+                Some(crate::lsp_client::LspTextEdit {
+                    new_text,
+                    start_line: start.get("line")?.as_u64()? as u32,
+                    start_character: start.get("character")?.as_u64()? as u32,
+                    end_line: end.get("line")?.as_u64()? as u32,
+                    end_character: end.get("character")?.as_u64()? as u32,
+                })
+            }).collect();
+            if text_edits.is_empty() { None } else { Some(crate::lsp_client::LspFileEdit { path, edits: text_edits }) }
+        }).collect()
+    } else {
+        Vec::new()
+    };
+    if changes.is_empty() { None } else { Some(crate::lsp_client::LspWorkspaceEdit { changes }) }
+}
+
+pub(super) fn parse_command(value: &JsonValue) -> Option<crate::lsp_client::LspCommand> {
+    let title = value.get("title")?.as_str()?.to_owned();
+    let command = value.get("command")?.as_str()?.to_owned();
+    let arguments = value.get("arguments")
+        .and_then(JsonValue::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Some(crate::lsp_client::LspCommand { title, command, arguments })
+}
+
+#[allow(clippy::cast_possible_truncation)]
+pub(super) fn parse_signature_help(value: &JsonValue) -> Option<crate::lsp_client::LspSignatureHelpResult> {
+    let signatures_arr = value.get("signatures")?.as_array()?;
+    let signatures: Vec<crate::lsp_client::LspSignatureInformation> = signatures_arr.iter().filter_map(|sig| {
+        let label = sig.get("label")?.as_str()?.to_owned();
+        let documentation = sig.get("documentation")
+            .and_then(|d| d.get("value").and_then(JsonValue::as_str).or_else(|| d.as_str()))
+            .map(str::to_owned);
+        let parameters = sig.get("parameters").and_then(JsonValue::as_array)
+            .map(|arr| arr.iter().filter_map(|p| {
+                let plabel = p.get("label").and_then(|l| l.as_str().or_else(|| l.get("value").and_then(JsonValue::as_str))).unwrap_or("").to_owned();
+                let pdoc = p.get("documentation")
+                    .and_then(|d| d.get("value").and_then(JsonValue::as_str).or_else(|| d.as_str()))
+                    .map(str::to_owned);
+                Some(crate::lsp_client::LspParameterInfo { label: plabel, documentation: pdoc })
+            }).collect())
+            .unwrap_or_default();
+        let active_parameter = sig.get("activeParameter").and_then(JsonValue::as_u64).map(|v| v as u32);
+        Some(crate::lsp_client::LspSignatureInformation { label, documentation, parameters, active_parameter })
+    }).collect();
+    let active_signature = value.get("activeSignature").and_then(JsonValue::as_u64).map(|v| v as u32);
+    let active_parameter = value.get("activeParameter").and_then(JsonValue::as_u64).map(|v| v as u32);
+    Some(crate::lsp_client::LspSignatureHelpResult { signatures, active_signature, active_parameter })
+}
+
+#[allow(clippy::cast_possible_truncation)]
+pub(super) fn parse_code_lens(value: &JsonValue) -> Vec<crate::lsp_client::LspCodeLens> {
+    let Some(items) = value.as_array() else {
+        return Vec::new();
+    };
+    items.iter().filter_map(|item| {
+        let range = item.get("range")?;
+        let start = range.get("start")?;
+        let line = start.get("line")?.as_u64()? as u32;
+        let character = start.get("character")?.as_u64()? as u32;
+        let command = item.get("command").and_then(parse_command);
+        let data = item.get("data").cloned();
+        Some(crate::lsp_client::LspCodeLens { line, character, command, data })
+    }).collect()
+}
+
+pub(super) fn parse_workspace_symbols(value: &JsonValue) -> Vec<crate::lsp_client::LspSymbol> {
+    let Some(items) = value.as_array() else {
+        return Vec::new();
+    };
+    items.iter().filter_map(|item| {
+        let name = item.get("name")?.as_str()?.to_owned();
+        let kind = item.get("kind").and_then(JsonValue::as_u64).map_or_else(|| "Unknown".into(), symbol_kind_name);
+        let path = item.get("location")
+            .and_then(|l| l.get("uri"))
+            .and_then(JsonValue::as_str)
+            .map(uri_to_path)
+            .or_else(|| item.get("uri").and_then(JsonValue::as_str).map(uri_to_path))
+            .unwrap_or_default();
+        let line = item.get("location")
+            .and_then(|l| l.get("range"))
+            .and_then(|r| r.get("start"))
+            .and_then(|s| s.get("line"))
+            .and_then(JsonValue::as_u64)
+            .map_or(0, |v| v as u32);
+        let character = item.get("location")
+            .and_then(|l| l.get("range"))
+            .and_then(|r| r.get("start"))
+            .and_then(|s| s.get("character"))
+            .and_then(JsonValue::as_u64)
+            .map_or(0, |v| v as u32);
+        Some(crate::lsp_client::LspSymbol { name, kind, path, line, character })
+    }).collect()
+}
+
+pub(super) fn rename_params(uri: &str, line: u32, character: u32, new_name: &str) -> JsonValue {
+    serde_json::json!({
+        "textDocument": { "uri": uri },
+        "position": { "line": line, "character": character },
+        "newName": new_name
+    })
+}
+
+pub(super) fn workspace_symbol_params(query: &str) -> JsonValue {
+    serde_json::json!({
+        "query": query
+    })
+}

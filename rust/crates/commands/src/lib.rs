@@ -4198,8 +4198,7 @@ pub fn handle_slash_command(
         | SlashCommand::AddDir { .. }
         | SlashCommand::History { .. }
         | SlashCommand::Lsp { .. }
-        | SlashCommand::Setup
-        | SlashCommand::Unknown(_) => None,
+        | SlashCommand::Setup        | SlashCommand::Unknown(_) => None,
     }
 }
 
@@ -4736,8 +4735,7 @@ mod tests {
         assert!(help.contains("aliases: /skill"));
         assert!(!help.contains("/login"));
         assert!(!help.contains("/logout"));
-        assert_eq!(slash_command_specs().len(), 141);
-        assert!(resume_supported_slash_commands().len() >= 39);
+        assert_eq!(slash_command_specs().len(), 141);        assert!(resume_supported_slash_commands().len() >= 39);
     }
 
     #[test]

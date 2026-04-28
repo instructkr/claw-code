@@ -1070,14 +1070,16 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "LSP",
-            description: "Query Language Server Protocol for code intelligence (symbols, references, diagnostics).",
+            description: "Query Language Server Protocol for code intelligence (symbols, references, diagnostics, code actions, rename, signature help, code lens, workspace symbols).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": ["symbols", "references", "diagnostics", "definition", "hover"] },
+                    "action": { "type": "string", "enum": ["symbols", "references", "diagnostics", "definition", "hover", "code_action", "rename", "signature_help", "code_lens", "workspace_symbols"] },
                     "path": { "type": "string" },
                     "line": { "type": "integer", "minimum": 0 },
                     "character": { "type": "integer", "minimum": 0 },
+                    "end_line": { "type": "integer", "minimum": 0 },
+                    "end_character": { "type": "integer", "minimum": 0 },
                     "query": { "type": "string" }
                 },
                 "required": ["action"],
@@ -1661,7 +1663,18 @@ fn run_lsp(input: LspInput) -> Result<String, String> {
     let character = input.character;
     let query = input.query.as_deref();
 
-    match registry.dispatch(action, path, line, character, query) {
+    // For code_action, pass end_line/end_character through the query param
+    // since dispatch() doesn't take them directly — encode as "end_line:end_character"
+    let effective_query = if input.action == "code_action" {
+        match (input.end_line, input.end_character) {
+            (Some(el), Some(ec)) => Some(format!("{el}:{ec}")),
+            _ => query.map(str::to_owned),
+        }
+    } else {
+        query.map(str::to_owned)
+    };
+
+    match registry.dispatch(action, path, line, character, effective_query.as_deref()) {
         Ok(result) => to_pretty_json(result),
         Err(e) => to_pretty_json(json!({
             "action": action,
@@ -2572,6 +2585,10 @@ struct LspInput {
     line: Option<u32>,
     #[serde(default)]
     character: Option<u32>,
+    #[serde(default)]
+    end_line: Option<u32>,
+    #[serde(default)]
+    end_character: Option<u32>,
     #[serde(default)]
     query: Option<String>,
 }
