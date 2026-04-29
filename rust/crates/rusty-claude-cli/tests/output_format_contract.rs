@@ -495,8 +495,7 @@ fn prompt_subcommand_without_arg_emits_cli_parse_envelope_with_hint_247() {
         "short reason should match the raw error, envelope: {envelope}"
     );
     assert_eq!(
-        envelope["hint"],
-        "Run `claw --help` for usage.",
+        envelope["hint"], "Run `claw --help` for usage.",
         "JSON envelope must carry the same help-runbook hint as text mode, envelope: {envelope}"
     );
 }
@@ -677,7 +676,14 @@ fn v1_5_emission_baseline_shape_parity_168c_task4() {
         (
             "doctor",
             &["doctor"],
-            &["checks", "has_failures", "kind", "message", "report", "summary"],
+            &[
+                "checks",
+                "has_failures",
+                "kind",
+                "message",
+                "report",
+                "summary",
+            ],
         ),
         (
             "skills",
@@ -687,7 +693,14 @@ fn v1_5_emission_baseline_shape_parity_168c_task4() {
         (
             "agents",
             &["agents"],
-            &["action", "agents", "count", "kind", "summary", "working_directory"],
+            &[
+                "action",
+                "agents",
+                "count",
+                "kind",
+                "summary",
+                "working_directory",
+            ],
         ),
         (
             "system-prompt",
@@ -736,7 +749,8 @@ fn v1_5_emission_baseline_shape_parity_168c_task4() {
         let mut actual_sorted = actual_keys.clone();
         actual_sorted.sort();
 
-        let mut expected_sorted: Vec<String> = expected_keys.iter().map(|s| s.to_string()).collect();
+        let mut expected_sorted: Vec<String> =
+            expected_keys.iter().map(|s| s.to_string()).collect();
         expected_sorted.sort();
 
         assert_eq!(
@@ -816,8 +830,7 @@ fn unrecognized_argument_still_classifies_as_cli_parse_247_regression_guard() {
         "unrecognized-argument must remain cli_parse, envelope: {envelope}"
     );
     assert_eq!(
-        envelope["hint"],
-        "Run `claw --help` for usage.",
+        envelope["hint"], "Run `claw --help` for usage.",
         "unrecognized-argument hint should stay intact, envelope: {envelope}"
     );
 }

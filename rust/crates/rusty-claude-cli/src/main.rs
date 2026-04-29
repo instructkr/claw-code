@@ -273,7 +273,10 @@ fn classify_error_kind(message: &str) -> &'static str {
     // Check specific patterns first (more specific before generic)
     if message.contains("missing Anthropic credentials") {
         "missing_credentials"
-    } else if message.contains("export failed:") || message.contains("diff failed:") || message.contains("config failed:") {
+    } else if message.contains("export failed:")
+        || message.contains("diff failed:")
+        || message.contains("config failed:")
+    {
         // #130b: Filesystem operation errors enriched with operation+path context.
         "filesystem_io_error"
     } else if message.contains("Manifest source files are missing") {
@@ -840,13 +843,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 index += 1;
             }
             "--help" | "-h"
-                if !rest.is_empty()
-                    && matches!(
-                        rest[0].as_str(),
-                        "commit"
-                            | "pr"
-                            | "issue"
-                    ) =>
+                if !rest.is_empty() && matches!(rest[0].as_str(), "commit" | "pr" | "issue") =>
             {
                 // `--help` following a subcommand that would otherwise forward
                 // the arg to the API should show top-level help instead.
@@ -2654,63 +2651,61 @@ fn check_workspace_health(context: &StatusContext) -> DiagnosticCheck {
             "current directory is not inside a git project".to_string(),
         ),
     };
-    DiagnosticCheck::new(
-        "Workspace",
-        level,
-        summary,
-    )
-    .with_details(vec![
-        format!("Cwd              {}", context.cwd.display()),
-        format!(
-            "Project root     {}",
-            context
-                .project_root
-                .as_ref()
-                .map_or_else(|| "<none>".to_string(), |path| path.display().to_string())
-        ),
-        format!(
-            "Git branch       {}",
-            context.git_branch.as_deref().unwrap_or("unknown")
-        ),
-        format!("Git state        {}", context.git_summary.headline()),
-        format!("Changed files    {}", context.git_summary.changed_files),
-        format!(
-            "Memory files     {} · config files loaded {}/{}",
-            context.memory_file_count, context.loaded_config_files, context.discovered_config_files
-        ),
-    ])
-    .with_data(Map::from_iter([
-        ("cwd".to_string(), json!(context.cwd.display().to_string())),
-        (
-            "project_root".to_string(),
-            json!(context
-                .project_root
-                .as_ref()
-                .map(|path| path.display().to_string())),
-        ),
-        ("in_git_repo".to_string(), json!(in_repo)),
-        ("git_branch".to_string(), json!(context.git_branch)),
-        (
-            "git_state".to_string(),
-            json!(context.git_summary.headline()),
-        ),
-        (
-            "changed_files".to_string(),
-            json!(context.git_summary.changed_files),
-        ),
-        (
-            "memory_file_count".to_string(),
-            json!(context.memory_file_count),
-        ),
-        (
-            "loaded_config_files".to_string(),
-            json!(context.loaded_config_files),
-        ),
-        (
-            "discovered_config_files".to_string(),
-            json!(context.discovered_config_files),
-        ),
-    ]))
+    DiagnosticCheck::new("Workspace", level, summary)
+        .with_details(vec![
+            format!("Cwd              {}", context.cwd.display()),
+            format!(
+                "Project root     {}",
+                context
+                    .project_root
+                    .as_ref()
+                    .map_or_else(|| "<none>".to_string(), |path| path.display().to_string())
+            ),
+            format!(
+                "Git branch       {}",
+                context.git_branch.as_deref().unwrap_or("unknown")
+            ),
+            format!("Git state        {}", context.git_summary.headline()),
+            format!("Changed files    {}", context.git_summary.changed_files),
+            format!(
+                "Memory files     {} · config files loaded {}/{}",
+                context.memory_file_count,
+                context.loaded_config_files,
+                context.discovered_config_files
+            ),
+        ])
+        .with_data(Map::from_iter([
+            ("cwd".to_string(), json!(context.cwd.display().to_string())),
+            (
+                "project_root".to_string(),
+                json!(context
+                    .project_root
+                    .as_ref()
+                    .map(|path| path.display().to_string())),
+            ),
+            ("in_git_repo".to_string(), json!(in_repo)),
+            ("git_branch".to_string(), json!(context.git_branch)),
+            (
+                "git_state".to_string(),
+                json!(context.git_summary.headline()),
+            ),
+            (
+                "changed_files".to_string(),
+                json!(context.git_summary.changed_files),
+            ),
+            (
+                "memory_file_count".to_string(),
+                json!(context.memory_file_count),
+            ),
+            (
+                "loaded_config_files".to_string(),
+                json!(context.loaded_config_files),
+            ),
+            (
+                "discovered_config_files".to_string(),
+                json!(context.discovered_config_files),
+            ),
+        ]))
 }
 
 fn check_sandbox_health(status: &runtime::SandboxStatus) -> DiagnosticCheck {
@@ -9467,9 +9462,9 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                     .blocks
                     .iter()
                     .filter_map(|block| match block {
-                        ContentBlock::Text { text } => Some(InputContentBlock::Text {
-                            text: text.clone(),
-                        }),
+                        ContentBlock::Text { text } => {
+                            Some(InputContentBlock::Text { text: text.clone() })
+                        }
                         ContentBlock::ToolUse { id, name, input } if has_all_tool_results => {
                             Some(InputContentBlock::ToolUse {
                                 id: id.clone(),
@@ -9509,9 +9504,9 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                     .blocks
                     .iter()
                     .filter_map(|block| match block {
-                        ContentBlock::Text { text } => Some(InputContentBlock::Text {
-                            text: text.clone(),
-                        }),
+                        ContentBlock::Text { text } => {
+                            Some(InputContentBlock::Text { text: text.clone() })
+                        }
                         ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. } => None,
                     })
                     .collect::<Vec<_>>();
@@ -10748,8 +10743,7 @@ mod tests {
         // through to `_other => Prompt` and emitted `missing_credentials`
         // for purely-local operations.
         assert_eq!(
-            parse_args(&["list-sessions".to_string()])
-                .expect("list-sessions should parse"),
+            parse_args(&["list-sessions".to_string()]).expect("list-sessions should parse"),
             CliAction::ListSessions {
                 output_format: CliOutputFormat::Text,
             },
@@ -10767,11 +10761,8 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_args(&[
-                "load-session".to_string(),
-                "my-session-id".to_string(),
-            ])
-            .expect("load-session <id> should parse"),
+            parse_args(&["load-session".to_string(), "my-session-id".to_string(),])
+                .expect("load-session <id> should parse"),
             CliAction::LoadSession {
                 session_reference: "my-session-id".to_string(),
                 output_format: CliOutputFormat::Text,
@@ -10779,11 +10770,8 @@ mod tests {
             "load-session must dispatch to LoadSession, not fall through to Prompt"
         );
         assert_eq!(
-            parse_args(&[
-                "delete-session".to_string(),
-                "my-session-id".to_string(),
-            ])
-            .expect("delete-session <id> should parse"),
+            parse_args(&["delete-session".to_string(), "my-session-id".to_string(),])
+                .expect("delete-session <id> should parse"),
             CliAction::DeleteSession {
                 session_id: "my-session-id".to_string(),
                 output_format: CliOutputFormat::Text,
@@ -10791,11 +10779,8 @@ mod tests {
             "delete-session must dispatch to DeleteSession, not fall through to Prompt"
         );
         assert_eq!(
-            parse_args(&[
-                "flush-transcript".to_string(),
-                "my-session-id".to_string(),
-            ])
-            .expect("flush-transcript <id> should parse"),
+            parse_args(&["flush-transcript".to_string(), "my-session-id".to_string(),])
+                .expect("flush-transcript <id> should parse"),
             CliAction::FlushTranscript {
                 session_id: "my-session-id".to_string(),
                 output_format: CliOutputFormat::Text,
@@ -10816,11 +10801,8 @@ mod tests {
             "missing session-id error should be specific, got: {delete_err}"
         );
         // #251: extra arguments must be rejected
-        let extra_err = parse_args(&[
-            "list-sessions".to_string(),
-            "unexpected".to_string(),
-        ])
-        .expect_err("list-sessions with extra args should be rejected");
+        let extra_err = parse_args(&["list-sessions".to_string(), "unexpected".to_string()])
+            .expect_err("list-sessions with extra args should be rejected");
         assert!(
             extra_err.contains("unexpected extra arguments"),
             "extra-args error should be specific, got: {extra_err}"
@@ -10830,7 +10812,8 @@ mod tests {
         // "filesystem_io_error" kind, not default "unknown". This closes the
         // context-loss chain (run_export -> fs::write -> ? -> to_string ->
         // classify miss -> unknown) that #130b identified.
-        let export_err_msg = "export failed: /tmp/bad/path (No such file or directory (os error 2))";
+        let export_err_msg =
+            "export failed: /tmp/bad/path (No such file or directory (os error 2))";
         assert_eq!(
             classify_error_kind(export_err_msg),
             "filesystem_io_error",
@@ -10868,77 +10851,58 @@ mod tests {
         // Regression: `diff` was the outlier among local introspection commands
         // (status/config/mcp all accepted --help) because its parser arm rejected
         // all extra args before help detection could run.
-        let diff_help_action = parse_args(&[
-            "diff".to_string(),
-            "--help".to_string(),
-        ])
-        .expect("diff --help must parse as help action");
+        let diff_help_action = parse_args(&["diff".to_string(), "--help".to_string()])
+            .expect("diff --help must parse as help action");
         assert!(
             matches!(diff_help_action, CliAction::HelpTopic(LocalHelpTopic::Diff)),
             "#130c: diff --help must route to LocalHelpTopic::Diff, got: {diff_help_action:?}"
         );
-        let diff_h_action = parse_args(&[
-            "diff".to_string(),
-            "-h".to_string(),
-        ])
-        .expect("diff -h must parse as help action");
+        let diff_h_action = parse_args(&["diff".to_string(), "-h".to_string()])
+            .expect("diff -h must parse as help action");
         assert!(
             matches!(diff_h_action, CliAction::HelpTopic(LocalHelpTopic::Diff)),
             "#130c: diff -h (short form) must route to LocalHelpTopic::Diff"
         );
         // #130c: bare `claw diff` still routes to Diff action, not help.
-        let diff_action = parse_args(&[
-            "diff".to_string(),
-        ])
-        .expect("bare diff must parse as diff action");
+        let diff_action =
+            parse_args(&["diff".to_string()]).expect("bare diff must parse as diff action");
         assert!(
             matches!(diff_action, CliAction::Diff { .. }),
             "#130c: bare diff must still route to Diff action, got: {diff_action:?}"
         );
         // #130c: unknown args still rejected (non-regression).
-        let diff_bad_arg = parse_args(&[
-            "diff".to_string(),
-            "foo".to_string(),
-        ])
-        .expect_err("diff foo must still be rejected as extra args");
+        let diff_bad_arg = parse_args(&["diff".to_string(), "foo".to_string()])
+            .expect_err("diff foo must still be rejected as extra args");
         assert!(
             diff_bad_arg.contains("unexpected extra arguments"),
             "#130c: diff with unknown arg must still error, got: {diff_bad_arg}"
         );
         // #130d: `claw config --help` must route to help topic, not silently run config.
-        let config_help_action = parse_args(&[
-            "config".to_string(),
-            "--help".to_string(),
-        ])
-        .expect("config --help must parse as help action");
+        let config_help_action = parse_args(&["config".to_string(), "--help".to_string()])
+            .expect("config --help must parse as help action");
         assert!(
             matches!(config_help_action, CliAction::HelpTopic(LocalHelpTopic::Config)),
             "#130d: config --help must route to LocalHelpTopic::Config, got: {config_help_action:?}"
         );
-        let config_h_action = parse_args(&[
-            "config".to_string(),
-            "-h".to_string(),
-        ])
-        .expect("config -h must parse as help action");
+        let config_h_action = parse_args(&["config".to_string(), "-h".to_string()])
+            .expect("config -h must parse as help action");
         assert!(
-            matches!(config_h_action, CliAction::HelpTopic(LocalHelpTopic::Config)),
+            matches!(
+                config_h_action,
+                CliAction::HelpTopic(LocalHelpTopic::Config)
+            ),
             "#130d: config -h (short form) must route to LocalHelpTopic::Config"
         );
         // #130d: bare `claw config` still routes to Config action with no section
-        let config_action = parse_args(&[
-            "config".to_string(),
-        ])
-        .expect("bare config must parse as config action");
+        let config_action =
+            parse_args(&["config".to_string()]).expect("bare config must parse as config action");
         assert!(
             matches!(config_action, CliAction::Config { section: None, .. }),
             "#130d: bare config must still route to Config action with section=None"
         );
         // #130d: config with section still works (non-regression)
-        let config_section = parse_args(&[
-            "config".to_string(),
-            "permissions".to_string(),
-        ])
-        .expect("config permissions must parse");
+        let config_section = parse_args(&["config".to_string(), "permissions".to_string()])
+            .expect("config permissions must parse");
         assert!(
             matches!(config_section, CliAction::Config { section: Some(ref s), .. } if s == "permissions"),
             "#130d: config with section must still work"
@@ -10947,76 +10911,70 @@ mod tests {
         // These previously emitted `missing_credentials` instead of showing help,
         // because parse_local_help_action() didn't route them. Now they route
         // to dedicated help topics before credential check.
-        let help_help = parse_args(&[
-            "help".to_string(),
-            "--help".to_string(),
-        ])
-        .expect("help --help must parse as help action");
+        let help_help = parse_args(&["help".to_string(), "--help".to_string()])
+            .expect("help --help must parse as help action");
         assert!(
             matches!(help_help, CliAction::HelpTopic(LocalHelpTopic::Meta)),
             "#130e: help --help must route to LocalHelpTopic::Meta, got: {help_help:?}"
         );
-        let submit_help = parse_args(&[
-            "submit".to_string(),
-            "--help".to_string(),
-        ])
-        .expect("submit --help must parse as help action");
+        let submit_help = parse_args(&["submit".to_string(), "--help".to_string()])
+            .expect("submit --help must parse as help action");
         assert!(
             matches!(submit_help, CliAction::HelpTopic(LocalHelpTopic::Submit)),
             "#130e: submit --help must route to LocalHelpTopic::Submit"
         );
-        let resume_help = parse_args(&[
-            "resume".to_string(),
-            "--help".to_string(),
-        ])
-        .expect("resume --help must parse as help action");
+        let resume_help = parse_args(&["resume".to_string(), "--help".to_string()])
+            .expect("resume --help must parse as help action");
         assert!(
             matches!(resume_help, CliAction::HelpTopic(LocalHelpTopic::Resume)),
             "#130e: resume --help must route to LocalHelpTopic::Resume"
         );
         // Short form `-h` works for all three
-        let help_h = parse_args(&["help".to_string(), "-h".to_string()])
-            .expect("help -h must parse");
+        let help_h =
+            parse_args(&["help".to_string(), "-h".to_string()]).expect("help -h must parse");
         assert!(matches!(help_h, CliAction::HelpTopic(LocalHelpTopic::Meta)));
-        let submit_h = parse_args(&["submit".to_string(), "-h".to_string()])
-            .expect("submit -h must parse");
-        assert!(matches!(submit_h, CliAction::HelpTopic(LocalHelpTopic::Submit)));
-        let resume_h = parse_args(&["resume".to_string(), "-h".to_string()])
-            .expect("resume -h must parse");
-        assert!(matches!(resume_h, CliAction::HelpTopic(LocalHelpTopic::Resume)));
+        let submit_h =
+            parse_args(&["submit".to_string(), "-h".to_string()]).expect("submit -h must parse");
+        assert!(matches!(
+            submit_h,
+            CliAction::HelpTopic(LocalHelpTopic::Submit)
+        ));
+        let resume_h =
+            parse_args(&["resume".to_string(), "-h".to_string()]).expect("resume -h must parse");
+        assert!(matches!(
+            resume_h,
+            CliAction::HelpTopic(LocalHelpTopic::Resume)
+        ));
         // #130e-B: surface-level help fixes for plugins and prompt.
         // These previously emitted "Unknown action" (plugins) or wrong help (prompt).
-        let plugins_help = parse_args(&[
-            "plugins".to_string(),
-            "--help".to_string(),
-        ])
-        .expect("plugins --help must parse as help action");
+        let plugins_help = parse_args(&["plugins".to_string(), "--help".to_string()])
+            .expect("plugins --help must parse as help action");
         assert!(
             matches!(plugins_help, CliAction::HelpTopic(LocalHelpTopic::Plugins)),
             "#130e-B: plugins --help must route to LocalHelpTopic::Plugins, got: {plugins_help:?}"
         );
-        let prompt_help = parse_args(&[
-            "prompt".to_string(),
-            "--help".to_string(),
-        ])
-        .expect("prompt --help must parse as help action");
+        let prompt_help = parse_args(&["prompt".to_string(), "--help".to_string()])
+            .expect("prompt --help must parse as help action");
         assert!(
             matches!(prompt_help, CliAction::HelpTopic(LocalHelpTopic::Prompt)),
             "#130e-B: prompt --help must route to LocalHelpTopic::Prompt, got: {prompt_help:?}"
         );
         // Short forms
-        let plugins_h = parse_args(&["plugins".to_string(), "-h".to_string()])
-            .expect("plugins -h must parse");
-        assert!(matches!(plugins_h, CliAction::HelpTopic(LocalHelpTopic::Plugins)));
-        let prompt_h = parse_args(&["prompt".to_string(), "-h".to_string()])
-            .expect("prompt -h must parse");
-        assert!(matches!(prompt_h, CliAction::HelpTopic(LocalHelpTopic::Prompt)));
+        let plugins_h =
+            parse_args(&["plugins".to_string(), "-h".to_string()]).expect("plugins -h must parse");
+        assert!(matches!(
+            plugins_h,
+            CliAction::HelpTopic(LocalHelpTopic::Plugins)
+        ));
+        let prompt_h =
+            parse_args(&["prompt".to_string(), "-h".to_string()]).expect("prompt -h must parse");
+        assert!(matches!(
+            prompt_h,
+            CliAction::HelpTopic(LocalHelpTopic::Prompt)
+        ));
         // Non-regression: `prompt "actual text"` still parses as Prompt action
-        let prompt_action = parse_args(&[
-            "prompt".to_string(),
-            "hello world".to_string(),
-        ])
-        .expect("prompt with real text must parse");
+        let prompt_action = parse_args(&["prompt".to_string(), "hello world".to_string()])
+            .expect("prompt with real text must parse");
         assert!(
             matches!(prompt_action, CliAction::Prompt { ref prompt, .. } if prompt == "hello world"),
             "#130e-B: prompt with real text must route to Prompt action"
@@ -11598,9 +11556,7 @@ mod tests {
             "invalid --output-format value must classify as cli_parse"
         );
         assert_eq!(
-            classify_error_kind(
-                "unsupported value for --permission-mode: bogus (expected ...)"
-            ),
+            classify_error_kind("unsupported value for --permission-mode: bogus (expected ...)"),
             "cli_parse",
             "invalid --permission-mode value must classify as cli_parse"
         );
@@ -11681,16 +11637,12 @@ mod tests {
         // Before #171, these were classified `unknown`, breaking typed-error
         // consumer dispatch on what is clearly a CLI parse error.
         assert_eq!(
-            classify_error_kind(
-                "unexpected extra arguments after `claw list-sessions`: --help"
-            ),
+            classify_error_kind("unexpected extra arguments after `claw list-sessions`: --help"),
             "cli_parse",
             "list-sessions extra args must classify as cli_parse"
         );
         assert_eq!(
-            classify_error_kind(
-                "unexpected extra arguments after `claw plugins list`: --foo"
-            ),
+            classify_error_kind("unexpected extra arguments after `claw plugins list`: --foo"),
             "cli_parse",
             "plugins subcommand extra args must classify as cli_parse"
         );
@@ -11700,9 +11652,7 @@ mod tests {
             "diff extra args must classify as cli_parse"
         );
         assert_eq!(
-            classify_error_kind(
-                "unexpected extra arguments after `claw config show`: --baz"
-            ),
+            classify_error_kind("unexpected extra arguments after `claw config show`: --baz"),
             "cli_parse",
             "config subcommand extra args must classify as cli_parse"
         );
@@ -11710,9 +11660,7 @@ mod tests {
         // match, so unrelated prose with "unexpected extra arguments" in a
         // different structure falls through.
         assert_eq!(
-            classify_error_kind(
-                "the API returned unexpected extra arguments in some response"
-            ),
+            classify_error_kind("the API returned unexpected extra arguments in some response"),
             "unknown",
             "generic prose with 'unexpected extra arguments' should fall through"
         );
@@ -14681,18 +14629,17 @@ mod doctor_broad_cwd_tests {
         let check = check_workspace_health(&ctx);
         // Use rendered output as the contract surface.
         let rendered = render_diagnostic_check(&check);
-        assert!(rendered.contains("Status           ok"),
-            "project dir should be OK; got:\n{rendered}");
+        assert!(
+            rendered.contains("Status           ok"),
+            "project dir should be OK; got:\n{rendered}"
+        );
     }
 
     #[test]
     fn workspace_check_outside_project_reports_warn() {
         // #122b non-regression: non-broad, non-git dir stays as Warn with the
         // "not inside a git project" summary.
-        let ctx = make_ctx(
-            PathBuf::from("/tmp/random-dir-not-project"),
-            None,
-        );
+        let ctx = make_ctx(PathBuf::from("/tmp/random-dir-not-project"), None);
         let check = check_workspace_health(&ctx);
         let rendered = render_diagnostic_check(&check);
         assert!(
