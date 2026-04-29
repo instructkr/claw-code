@@ -1002,7 +1002,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "TeamCreate",
-            description: "Create a team of agents that run in parallel. Each task becomes an independent Agent with its own context. Agents can communicate via AgentMessage. Poll agent .json files for completion status. Use 'mode' preset to auto-generate agent teams (e.g. '2x' = 2 Explore + 2 Plan + 2 Verification agents).",
+            description: "Create a team of agents that run in parallel. Each task becomes an independent Agent with its own context. Agents can communicate via AgentMessage. Use TeamStatus to check progress. Use 'mode' preset to auto-generate agent teams (e.g. '2x' = 2 Explore + 2 Plan + 2 Verification agents).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
