@@ -1335,7 +1335,9 @@ fn parse_sse_frame(
             return Err(ApiError::Api {
                 status: reqwest::StatusCode::BAD_REQUEST,
                 error_type: Some("invalid_response".to_string()),
-                message: Some("provider returned HTML instead of JSON (check endpoint URL)".to_string()),
+                message: Some(
+                    "provider returned HTML instead of JSON (check endpoint URL)".to_string(),
+                ),
                 request_id: None,
                 body: trimmed.chars().take(200).collect(),
                 retryable: false,
@@ -1454,7 +1456,10 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
     })
 }
 
-fn parse_retry_after(headers: &reqwest::header::HeaderMap, status: reqwest::StatusCode) -> Option<std::time::Duration> {
+fn parse_retry_after(
+    headers: &reqwest::header::HeaderMap,
+    status: reqwest::StatusCode,
+) -> Option<std::time::Duration> {
     if status != reqwest::StatusCode::TOO_MANY_REQUESTS {
         return None;
     }

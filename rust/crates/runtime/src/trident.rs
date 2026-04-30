@@ -78,7 +78,10 @@ impl TridentStats {
                 self.messages_clustered, self.clusters_found
             ),
             format!("  Original: {} messages", self.original_message_count),
-            format!("  Final:    {} messages ({:.1}x compression)", self.final_message_count, compression),
+            format!(
+                "  Final:    {} messages ({:.1}x compression)",
+                self.final_message_count, compression
+            ),
         ];
         if self.tokens_saved_estimate > 0 {
             lines.push(format!(
@@ -121,7 +124,8 @@ pub fn trident_compact_session(
     }
 
     if trident_config.collapse_enabled {
-        let (collapsed, chains, collapsed_count) = stage2_collapse(&messages, trident_config.collapse_threshold);
+        let (collapsed, chains, collapsed_count) =
+            stage2_collapse(&messages, trident_config.collapse_threshold);
         stats.collapsed_chains = chains;
         stats.messages_collapsed = collapsed_count;
         messages = collapsed;
@@ -178,10 +182,10 @@ fn stage1_supersede(messages: &[ConversationMessage]) -> (Vec<ConversationMessag
     for (i, msg) in messages.iter().enumerate() {
         for block in &msg.blocks {
             if let Some((path, op_type)) = extract_file_operation(block) {
-                file_ops.entry(path).or_default().push(FileOperation {
-                    index: i,
-                    op_type,
-                });
+                file_ops
+                    .entry(path)
+                    .or_default()
+                    .push(FileOperation { index: i, op_type });
             }
         }
     }
@@ -235,7 +239,9 @@ fn extract_file_operation(block: &ContentBlock) -> Option<(String, FileOp)> {
             };
             Some((path, op_type))
         }
-        ContentBlock::ToolResult { tool_name, output, .. } => {
+        ContentBlock::ToolResult {
+            tool_name, output, ..
+        } => {
             let path = extract_path_from_tool_output(tool_name, output)?;
             let op_type = match tool_name.as_str() {
                 "read_file" | "Read" => FileOp::Read,
@@ -250,8 +256,10 @@ fn extract_file_operation(block: &ContentBlock) -> Option<(String, FileOp)> {
 }
 
 fn extract_path_from_tool_input(tool_name: &str, input: &str) -> Option<String> {
-    if !matches!(tool_name, "read_file" | "write_file" | "edit_file" | "Read" | "Write" | "Edit")
-    {
+    if !matches!(
+        tool_name,
+        "read_file" | "write_file" | "edit_file" | "Read" | "Write" | "Edit"
+    ) {
         return None;
     }
     serde_json::from_str::<serde_json::Value>(input)
@@ -265,8 +273,10 @@ fn extract_path_from_tool_input(tool_name: &str, input: &str) -> Option<String> 
 }
 
 fn extract_path_from_tool_output(tool_name: &str, output: &str) -> Option<String> {
-    if !matches!(tool_name, "read_file" | "write_file" | "edit_file" | "Read" | "Write" | "Edit")
-    {
+    if !matches!(
+        tool_name,
+        "read_file" | "write_file" | "edit_file" | "Read" | "Write" | "Edit"
+    ) {
         return None;
     }
     serde_json::from_str::<serde_json::Value>(output)
@@ -340,14 +350,24 @@ fn stage2_collapse(
 }
 
 fn is_chatty_message(msg: &ConversationMessage) -> bool {
-    let total_chars: usize = msg.blocks.iter().map(|b| match b {
-        ContentBlock::Text { text } => text.len(),
-        ContentBlock::ToolUse { input, .. } => input.len(),
-        ContentBlock::ToolResult { output, .. } => output.len(),
-    }).sum();
+    let total_chars: usize = msg
+        .blocks
+        .iter()
+        .map(|b| match b {
+            ContentBlock::Text { text } => text.len(),
+            ContentBlock::ToolUse { input, .. } => input.len(),
+            ContentBlock::ToolResult { output, .. } => output.len(),
+        })
+        .sum();
 
-    let has_tool_use = msg.blocks.iter().any(|b| matches!(b, ContentBlock::ToolUse { .. }));
-    let has_tool_result = msg.blocks.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. }));
+    let has_tool_use = msg
+        .blocks
+        .iter()
+        .any(|b| matches!(b, ContentBlock::ToolUse { .. }));
+    let has_tool_result = msg
+        .blocks
+        .iter()
+        .any(|b| matches!(b, ContentBlock::ToolResult { .. }));
 
     if has_tool_use || has_tool_result {
         return false;
@@ -463,16 +483,12 @@ fn stage3_cluster(
         cluster_buffers.entry(cid).or_default().push(*msg_idx);
     }
 
-
-
     for (i, msg) in messages.iter().enumerate() {
         if let Some(&cid) = cluster_assignments.get(&i) {
             if let Some(buffer) = cluster_buffers.get_mut(&cid) {
                 if buffer[0] == i {
-                    let cluster_messages: Vec<&ConversationMessage> = buffer
-                        .iter()
-                        .filter_map(|&idx| messages.get(idx))
-                        .collect();
+                    let cluster_messages: Vec<&ConversationMessage> =
+                        buffer.iter().filter_map(|&idx| messages.get(idx)).collect();
                     let summary = generate_cluster_summary(&cluster_messages);
                     result.push(ConversationMessage {
                         role: MessageRole::System,
@@ -518,7 +534,9 @@ fn fingerprint_message(index: usize, msg: &ConversationMessage) -> Option<Messag
                 }
                 text_length += input.len();
             }
-            ContentBlock::ToolResult { tool_name, output, .. } => {
+            ContentBlock::ToolResult {
+                tool_name, output, ..
+            } => {
                 tool_names.insert(tool_name.clone());
                 if let Some(path) = extract_path_from_tool_output(tool_name, output) {
                     file_paths.insert(path);
@@ -591,7 +609,9 @@ fn generate_cluster_summary(messages: &[&ConversationMessage]) -> String {
                         file_paths.insert(path);
                     }
                 }
-                ContentBlock::ToolResult { tool_name, output, .. } => {
+                ContentBlock::ToolResult {
+                    tool_name, output, ..
+                } => {
                     tool_names.insert(tool_name.clone());
                     if let Some(path) = extract_path_from_tool_output(tool_name, output) {
                         file_paths.insert(path);
@@ -660,13 +680,23 @@ mod tests {
                 name: "read_file".to_string(),
                 input: r#"{"path":"src/main.rs"}"#.to_string(),
             }]),
-            ConversationMessage::tool_result("1", "read_file", r#"{"path":"src/main.rs","content":"old"}"#, false),
+            ConversationMessage::tool_result(
+                "1",
+                "read_file",
+                r#"{"path":"src/main.rs","content":"old"}"#,
+                false,
+            ),
             ConversationMessage::assistant(vec![ContentBlock::ToolUse {
                 id: "2".to_string(),
                 name: "edit_file".to_string(),
                 input: r#"{"path":"src/main.rs","old":"old","new":"new"}"#.to_string(),
             }]),
-            ConversationMessage::tool_result("2", "edit_file", r#"{"path":"src/main.rs","ok":true}"#, false),
+            ConversationMessage::tool_result(
+                "2",
+                "edit_file",
+                r#"{"path":"src/main.rs","ok":true}"#,
+                false,
+            ),
         ];
 
         let (kept, superseded) = stage1_supersede(&messages);
@@ -682,7 +712,12 @@ mod tests {
                 name: "read_file".to_string(),
                 input: r#"{"path":"src/main.rs"}"#.to_string(),
             }]),
-            ConversationMessage::tool_result("1", "read_file", r#"{"path":"src/main.rs","content":"data"}"#, false),
+            ConversationMessage::tool_result(
+                "1",
+                "read_file",
+                r#"{"path":"src/main.rs","content":"data"}"#,
+                false,
+            ),
         ];
 
         let (kept, superseded) = stage1_supersede(&messages);
@@ -699,11 +734,13 @@ mod tests {
                 text: format!("got {i}"),
             }]));
         }
-        messages.push(ConversationMessage::assistant(vec![ContentBlock::ToolUse {
-            id: "t".to_string(),
-            name: "bash".to_string(),
-            input: r#"{"command":"ls"}"#.to_string(),
-        }]));
+        messages.push(ConversationMessage::assistant(vec![
+            ContentBlock::ToolUse {
+                id: "t".to_string(),
+                name: "bash".to_string(),
+                input: r#"{"command":"ls"}"#.to_string(),
+            },
+        ]));
 
         let (result, chains, collapsed) = stage2_collapse(&messages, 4);
         assert!(chains > 0, "should collapse at least one chain");
@@ -715,11 +752,13 @@ mod tests {
     fn stage3_clusters_similar_messages() {
         let mut messages = vec![];
         for i in 0..5 {
-            messages.push(ConversationMessage::assistant(vec![ContentBlock::ToolUse {
-                id: format!("read_{i}"),
-                name: "read_file".to_string(),
-                input: format!(r#"{{"path":"src/{i}.rs"}}"#),
-            }]));
+            messages.push(ConversationMessage::assistant(vec![
+                ContentBlock::ToolUse {
+                    id: format!("read_{i}"),
+                    name: "read_file".to_string(),
+                    input: format!(r#"{{"path":"src/{i}.rs"}}"#),
+                },
+            ]));
             messages.push(ConversationMessage::tool_result(
                 &format!("read_{i}"),
                 "read_file",
@@ -728,8 +767,7 @@ mod tests {
             ));
         }
 
-        let (result, clusters, clustered) =
-            stage3_cluster(&messages, 3, 0.4);
+        let (result, clusters, clustered) = stage3_cluster(&messages, 3, 0.4);
         assert!(clusters > 0, "should find at least one cluster");
         assert!(clustered > 0);
         assert!(result.len() < messages.len());
@@ -745,13 +783,23 @@ mod tests {
                 name: "read_file".to_string(),
                 input: r#"{"path":"src/main.rs"}"#.to_string(),
             }]),
-            ConversationMessage::tool_result("1", "read_file", r#"{"path":"src/main.rs","content":"fn main() { buggy }"}"#, false),
+            ConversationMessage::tool_result(
+                "1",
+                "read_file",
+                r#"{"path":"src/main.rs","content":"fn main() { buggy }"}"#,
+                false,
+            ),
             ConversationMessage::assistant(vec![ContentBlock::ToolUse {
                 id: "2".to_string(),
                 name: "edit_file".to_string(),
                 input: r#"{"path":"src/main.rs","old":"buggy","new":"fixed"}"#.to_string(),
             }]),
-            ConversationMessage::tool_result("2", "edit_file", r#"{"path":"src/main.rs","ok":true}"#, false),
+            ConversationMessage::tool_result(
+                "2",
+                "edit_file",
+                r#"{"path":"src/main.rs","ok":true}"#,
+                false,
+            ),
             ConversationMessage::assistant(vec![ContentBlock::Text {
                 text: "Fixed the bug in main.rs".to_string(),
             }]),
@@ -767,7 +815,10 @@ mod tests {
             &trident_config,
         );
 
-        assert!(result.removed_message_count > 0 || result.compacted_session.messages.len() < session.messages.len());
+        assert!(
+            result.removed_message_count > 0
+                || result.compacted_session.messages.len() < session.messages.len()
+        );
     }
 
     #[test]

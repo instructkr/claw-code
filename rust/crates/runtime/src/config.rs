@@ -1064,10 +1064,8 @@ fn parse_optional_api_timeout_config(root: &JsonValue) -> Result<ApiTimeoutConfi
         return Ok(ApiTimeoutConfig::default());
     };
     let context = "merged settings.apiTimeout";
-    let connect_timeout_secs = optional_u64(obj, "connectTimeout", context)?
-        .unwrap_or(30);
-    let request_timeout_secs = optional_u64(obj, "requestTimeout", context)?
-        .unwrap_or(300);
+    let connect_timeout_secs = optional_u64(obj, "connectTimeout", context)?.unwrap_or(30);
+    let request_timeout_secs = optional_u64(obj, "requestTimeout", context)?.unwrap_or(300);
     let max_retries = optional_u64(obj, "maxRetries", context)?
         .map(|v| v as u32)
         .unwrap_or(8);

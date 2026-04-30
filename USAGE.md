@@ -310,7 +310,9 @@ The OpenAI-compatible backend also serves as the gateway for **OpenRouter**, **O
 
 ### Configured OpenAI-compatible providers
 
-If you use several OpenAI-compatible providers, define named provider profiles in `settings.json` instead of changing `OPENAI_BASE_URL` before every run. Each profile gets its own base URL, credential env var, and model allow-list:
+If you use several OpenAI-compatible providers, define named provider profiles in `settings.json` instead of changing `OPENAI_BASE_URL` before every run. Each profile gets its own base URL, credential env var, and model allow-list.
+
+Run `claw login` or `/login` to create these profiles interactively for Z.AI, MiniMax, OpenAI, Moonshot/Kimi, or a custom OpenAI-compatible endpoint. The wizard can store a pasted local token in `~/.claw/settings.json`, but `apiKeyEnv` is preferred when you can keep the secret in your shell environment:
 
 ```json
 {
@@ -352,10 +354,27 @@ Use `/model provider/model` in the REPL to switch without restarting:
 You can also use the provider name alone when it has `defaultModel` configured:
 
 ```text
+/model zai
 /model minimax
 ```
 
 Prefer `apiKeyEnv` so secrets stay out of source-controlled project settings. `apiKey` is supported for local-only files when an environment variable is not practical.
+
+### Updating a local fork
+
+Use `claw update` from inside the `claw-code` checkout to fetch `origin`, merge the upstream default branch with `git merge --autostash`, and reinstall the local `claw` binary:
+
+```bash
+claw update
+```
+
+If you run it from another directory, point it at the checkout:
+
+```bash
+claw update --repo /path/to/claw-code
+```
+
+Use `--no-install` when you only want to merge upstream changes without reinstalling the binary.
 
 ### Tested models and aliases
 

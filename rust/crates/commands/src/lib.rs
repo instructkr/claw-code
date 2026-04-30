@@ -93,6 +93,13 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         resume_supported: false,
     },
     SlashCommandSpec {
+        name: "login",
+        aliases: &[],
+        summary: "Configure a model provider profile",
+        argument_hint: None,
+        resume_supported: false,
+    },
+    SlashCommandSpec {
         name: "permissions",
         aliases: &[],
         summary: "Show or switch the active permission mode",
@@ -1128,6 +1135,9 @@ pub enum SlashCommand {
     Review {
         scope: Option<String>,
     },
+    Team {
+        action: Option<String>,
+    },
     Tasks {
         args: Option<String>,
     },
@@ -1261,6 +1271,7 @@ impl SlashCommand {
             Self::PrivacySettings => "/privacy-settings",
             Self::Plan { .. } => "/plan",
             Self::Review { .. } => "/review",
+            Self::Team { .. } => "/team",
             Self::Tasks { .. } => "/tasks",
             Self::Theme { .. } => "/theme",
             Self::Voice { .. } => "/voice",
@@ -1341,6 +1352,10 @@ pub fn validate_slash_command_input(
         "model" => SlashCommand::Model {
             model: optional_single_arg(command, &args, "[model]")?,
         },
+        "login" => {
+            validate_no_args(command, &args)?;
+            SlashCommand::Login
+        }
         "permissions" => SlashCommand::Permissions {
             mode: parse_permissions_mode(&args)?,
         },
@@ -1387,7 +1402,7 @@ pub fn validate_slash_command_input(
             validate_no_args(command, &args)?;
             SlashCommand::Doctor
         }
-        "login" | "logout" => {
+        "logout" => {
             return Err(command_error(
                 "This auth flow was removed. Set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN instead.",
                 command,
@@ -1477,10 +1492,6 @@ pub fn validate_slash_command_input(
         "theme" => SlashCommand::Theme { name: remainder },
         "voice" => SlashCommand::Voice { mode: remainder },
         "usage" => SlashCommand::Usage { scope: remainder },
-<<<<<<< HEAD
-=======
-        "setup" => SlashCommand::Setup,
->>>>>>> 2f6a225 (fix: make id field optional in OpenAI response parsing)
         "rename" => SlashCommand::Rename { name: remainder },
         "copy" => SlashCommand::Copy { target: remainder },
         "hooks" => SlashCommand::Hooks { args: remainder },
@@ -4157,6 +4168,7 @@ pub fn handle_slash_command(
         | SlashCommand::PrivacySettings
         | SlashCommand::Plan { .. }
         | SlashCommand::Review { .. }
+        | SlashCommand::Team { .. }
         | SlashCommand::Tasks { .. }
         | SlashCommand::Theme { .. }
         | SlashCommand::Voice { .. }
@@ -4661,9 +4673,11 @@ mod tests {
     }
 
     #[test]
-    fn removed_login_and_logout_commands_report_env_auth_guidance() {
-        let login_error = parse_error_message("/login");
-        assert!(login_error.contains("ANTHROPIC_API_KEY"));
+    fn login_command_parses_and_logout_reports_env_auth_guidance() {
+        assert_eq!(
+            SlashCommand::parse("/login").expect("/login should parse"),
+            Some(SlashCommand::Login)
+        );
         let logout_error = parse_error_message("/logout");
         assert!(logout_error.contains("ANTHROPIC_AUTH_TOKEN"));
     }
@@ -4689,6 +4703,7 @@ mod tests {
         assert!(help.contains("/teleport <symbol-or-path>"));
         assert!(help.contains("/debug-tool-call"));
         assert!(help.contains("/model [model]"));
+        assert!(help.contains("/login"));
         assert!(help.contains("/permissions [read-only|workspace-write|danger-full-access]"));
         assert!(help.contains("/clear [--confirm]"));
         assert!(help.contains("/cost"));
@@ -4709,9 +4724,8 @@ mod tests {
         assert!(help.contains("/agents [list|help]"));
         assert!(help.contains("/skills [list|install <path>|help|<skill> [args]]"));
         assert!(help.contains("aliases: /skill"));
-        assert!(!help.contains("/login"));
         assert!(!help.contains("/logout"));
-        assert_eq!(slash_command_specs().len(), 139);
+        assert_eq!(slash_command_specs().len(), 140);
         assert!(resume_supported_slash_commands().len() >= 39);
     }
 

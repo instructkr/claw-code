@@ -426,6 +426,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             cli.run_turn_with_output(&effective_prompt, output_format, compact)?;
         }
         CliAction::Doctor { output_format } => run_doctor(output_format)?,
+        CliAction::Login => {
+            let selected_model = run_login_wizard()?;
+            if let Some(model) = selected_model {
+                println!(
+                    "Provider saved. Run `claw --model {model}` or `/model {model}` to use it."
+                );
+            }
+        }
+        CliAction::Update { repo, install } => run_update(repo.as_deref(), install)?,
         CliAction::Acp { output_format } => print_acp_status(output_format)?,
         CliAction::State { output_format } => run_worker_state(output_format)?,
         CliAction::Init { output_format } => run_init(output_format)?,
@@ -549,6 +558,11 @@ enum CliAction {
     },
     Doctor {
         output_format: CliOutputFormat,
+    },
+    Login,
+    Update {
+        repo: Option<PathBuf>,
+        install: bool,
     },
     Acp {
         output_format: CliOutputFormat,
@@ -962,7 +976,9 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         }
         "system-prompt" => parse_system_prompt_args(&rest[1..], output_format),
         "acp" => parse_acp_args(&rest[1..], output_format),
-        "login" | "logout" => Err(removed_auth_surface_error(rest[0].as_str())),
+        "login" => Ok(CliAction::Login),
+        "update" => parse_update_args(&rest[1..]),
+        "logout" => Err(removed_auth_surface_error(rest[0].as_str())),
         "init" => Ok(CliAction::Init { output_format }),
         "export" => parse_export_args(&rest[1..], output_format),
         "prompt" => {
@@ -1141,6 +1157,8 @@ fn bare_slash_command_guidance(command_name: &str) -> Option<String> {
             | "skills"
             | "system-prompt"
             | "init"
+            | "login"
+            | "update"
             | "prompt"
             | "export"
     ) {
@@ -1175,6 +1193,43 @@ fn parse_acp_args(args: &[String], output_format: CliOutputFormat) -> Result<Cli
             "unsupported ACP invocation. Use `claw acp`, `claw acp serve`, `claw --acp`, or `claw -acp`.",
         )),
     }
+}
+
+fn parse_update_args(args: &[String]) -> Result<CliAction, String> {
+    let mut repo = None;
+    let mut install = true;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--repo" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "missing value for claw update --repo".to_string())?;
+                repo = Some(PathBuf::from(value));
+                index += 2;
+            }
+            flag if flag.starts_with("--repo=") => {
+                repo = Some(PathBuf::from(&flag[7..]));
+                index += 1;
+            }
+            "--no-install" => {
+                install = false;
+                index += 1;
+            }
+            "--help" | "-h" => {
+                return Err(
+                    "Usage: claw update [--repo PATH] [--no-install]\nFetch origin, merge origin/main with --autostash, then reinstall the local claw binary."
+                        .to_string(),
+                );
+            }
+            other => {
+                return Err(format!(
+                    "unexpected argument for claw update: {other}. Usage: claw update [--repo PATH] [--no-install]"
+                ));
+            }
+        }
+    }
+    Ok(CliAction::Update { repo, install })
 }
 
 fn try_resolve_bare_skill_prompt(cwd: &Path, trimmed: &str) -> Option<String> {
@@ -1534,6 +1589,352 @@ fn configured_provider_for_model(
         api_key,
         base_url: provider.base_url().to_string(),
     }))
+}
+
+struct LoginProviderTemplate {
+    id: &'static str,
+    label: &'static str,
+    base_url: &'static str,
+    api_key_env: &'static str,
+    models: &'static [&'static str],
+    default_model: &'static str,
+}
+
+const LOGIN_PROVIDER_TEMPLATES: &[LoginProviderTemplate] = &[
+    LoginProviderTemplate {
+        id: "zai",
+        label: "Z.AI",
+        base_url: "https://api.z.ai/api/paas/v4",
+        api_key_env: "Z_AI_API_KEY",
+        models: &["glm-5.1", "glm-5", "glm-4.7", "glm-4.6"],
+        default_model: "glm-5.1",
+    },
+    LoginProviderTemplate {
+        id: "zai-coding",
+        label: "Z.AI Coding Plan",
+        base_url: "https://api.z.ai/api/coding/paas/v4",
+        api_key_env: "Z_AI_API_KEY",
+        models: &["glm-5.1", "glm-5", "glm-4.7", "glm-4.6"],
+        default_model: "glm-5.1",
+    },
+    LoginProviderTemplate {
+        id: "minimax",
+        label: "MiniMax",
+        base_url: "https://api.minimax.io/v1",
+        api_key_env: "MINIMAX_API_KEY",
+        models: &["MiniMax-M2.7", "MiniMax-M2.7-highspeed"],
+        default_model: "MiniMax-M2.7-highspeed",
+    },
+    LoginProviderTemplate {
+        id: "openai",
+        label: "OpenAI",
+        base_url: "https://api.openai.com/v1",
+        api_key_env: "OPENAI_API_KEY",
+        models: &["gpt-5.1", "gpt-5.1-codex", "gpt-4.1"],
+        default_model: "gpt-5.1",
+    },
+    LoginProviderTemplate {
+        id: "moonshot",
+        label: "Moonshot / Kimi",
+        base_url: "https://api.moonshot.ai/v1",
+        api_key_env: "MOONSHOT_API_KEY",
+        models: &["kimi-k2.5", "kimi-k2-turbo-preview", "kimi-k2-thinking"],
+        default_model: "kimi-k2.5",
+    },
+];
+
+fn run_login_wizard() -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if !io::stdin().is_terminal() {
+        return Err("login requires an interactive terminal".into());
+    }
+
+    println!();
+    println!("Claw provider login");
+    println!("Configure an OpenAI-compatible model provider profile.");
+    println!("Press Enter to accept defaults.");
+    println!();
+
+    for (index, provider) in LOGIN_PROVIDER_TEMPLATES.iter().enumerate() {
+        println!("  [{}] {}", index + 1, provider.label);
+    }
+    println!(
+        "  [{}] Custom OpenAI-compatible",
+        LOGIN_PROVIDER_TEMPLATES.len() + 1
+    );
+
+    let choice = read_prompt("Select provider [1]: ")?;
+    let choice = if choice.trim().is_empty() {
+        1
+    } else {
+        choice.trim().parse::<usize>()?
+    };
+
+    let (provider_id, label, default_base_url, default_api_key_env, default_models, default_model) =
+        if choice == LOGIN_PROVIDER_TEMPLATES.len() + 1 {
+            let id = read_required_prompt("Provider id (e.g. openrouter): ")?;
+            let base_url = read_required_prompt("Base URL: ")?;
+            let api_key_env = read_prompt("API key env var [OPENAI_API_KEY]: ")?;
+            let model = read_required_prompt("Default model: ")?;
+            (
+                id,
+                "Custom".to_string(),
+                base_url,
+                if api_key_env.trim().is_empty() {
+                    "OPENAI_API_KEY".to_string()
+                } else {
+                    api_key_env.trim().to_string()
+                },
+                vec![model.clone()],
+                model,
+            )
+        } else {
+            let template = LOGIN_PROVIDER_TEMPLATES
+                .get(choice.saturating_sub(1))
+                .ok_or_else(|| format!("invalid provider choice: {choice}"))?;
+            (
+                template.id.to_string(),
+                template.label.to_string(),
+                template.base_url.to_string(),
+                template.api_key_env.to_string(),
+                template
+                    .models
+                    .iter()
+                    .map(|model| (*model).to_string())
+                    .collect::<Vec<_>>(),
+                template.default_model.to_string(),
+            )
+        };
+
+    println!();
+    println!("{label}");
+    let base_url = read_prompt(&format!("Base URL [{default_base_url}]: "))?;
+    let base_url = if base_url.trim().is_empty() {
+        default_base_url
+    } else {
+        base_url.trim().to_string()
+    };
+    let api_key_env = read_prompt(&format!("API key env var [{default_api_key_env}]: "))?;
+    let api_key_env = if api_key_env.trim().is_empty() {
+        default_api_key_env
+    } else {
+        api_key_env.trim().to_string()
+    };
+
+    let token = read_prompt("Paste API key / bearer token now, or press Enter to use env var: ")?;
+    let api_key = (!token.trim().is_empty()).then(|| token.trim().to_string());
+
+    println!("Available models: {}", default_models.join(", "));
+    let model = read_prompt(&format!("Default model [{default_model}]: "))?;
+    let model = if model.trim().is_empty() {
+        default_model
+    } else {
+        model.trim().to_string()
+    };
+    let mut models = default_models;
+    if !models.iter().any(|known| known == &model) {
+        models.push(model.clone());
+    }
+
+    save_model_provider_profile(
+        &provider_id,
+        &base_url,
+        &api_key_env,
+        api_key.as_deref(),
+        &models,
+        &model,
+    )?;
+    Ok(Some(format!("{provider_id}/{model}")))
+}
+
+fn read_prompt(prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
+    print!("{prompt}");
+    io::stdout().flush()?;
+    let mut buffer = String::new();
+    io::stdin().read_line(&mut buffer)?;
+    Ok(buffer)
+}
+
+fn read_required_prompt(prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let value = read_prompt(prompt)?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("{prompt} is required").into());
+    }
+    Ok(value.to_string())
+}
+
+fn save_model_provider_profile(
+    provider_id: &str,
+    base_url: &str,
+    api_key_env: &str,
+    api_key: Option<&str>,
+    models: &[String],
+    default_model: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = env::current_dir()?;
+    let config_home = ConfigLoader::default_for(&cwd).config_home().to_path_buf();
+    fs::create_dir_all(&config_home)?;
+    let settings_path = config_home.join("settings.json");
+    let mut root = match fs::read_to_string(&settings_path) {
+        Ok(contents) if !contents.trim().is_empty() => serde_json::from_str::<Value>(&contents)?,
+        Ok(_) => Value::Object(Map::new()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Value::Object(Map::new()),
+        Err(error) => return Err(error.into()),
+    };
+    if !root.is_object() {
+        root = Value::Object(Map::new());
+    }
+    let root_object = root.as_object_mut().expect("root object initialized");
+    let providers = root_object
+        .entry("modelProviders")
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !providers.is_object() {
+        *providers = Value::Object(Map::new());
+    }
+    let provider_map = providers
+        .as_object_mut()
+        .expect("modelProviders object initialized");
+
+    let mut provider = Map::new();
+    provider.insert(
+        "type".to_string(),
+        Value::String("openai-compatible".to_string()),
+    );
+    provider.insert("baseUrl".to_string(), Value::String(base_url.to_string()));
+    provider.insert(
+        "apiKeyEnv".to_string(),
+        Value::String(api_key_env.to_string()),
+    );
+    if let Some(api_key) = api_key {
+        provider.insert("apiKey".to_string(), Value::String(api_key.to_string()));
+    }
+    provider.insert(
+        "models".to_string(),
+        Value::Array(
+            models
+                .iter()
+                .map(|model| Value::String(model.clone()))
+                .collect(),
+        ),
+    );
+    provider.insert(
+        "defaultModel".to_string(),
+        Value::String(default_model.to_string()),
+    );
+    provider_map.insert(provider_id.to_string(), Value::Object(provider));
+    root_object.insert(
+        "model".to_string(),
+        Value::String(format!("{provider_id}/{default_model}")),
+    );
+
+    let serialized = format!("{}\n", serde_json::to_string_pretty(&root)?);
+    fs::write(&settings_path, serialized)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&settings_path)?.permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&settings_path, permissions)?;
+    }
+    Ok(())
+}
+
+fn run_update(repo_arg: Option<&Path>, install: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let repo = resolve_update_repo(repo_arg)?;
+    println!("Updating claw-code in {}", repo.display());
+
+    run_command("git", &["fetch", "origin"], &repo)?;
+    let remote_ref = resolve_origin_default_ref(&repo)?;
+    run_command(
+        "git",
+        &["merge", "--no-edit", "--autostash", &remote_ref],
+        &repo,
+    )?;
+
+    if install {
+        let crate_path = repo.join("rust/crates/rusty-claude-cli");
+        if !crate_path.join("Cargo.toml").exists() {
+            return Err(format!(
+                "cannot reinstall claw: {} does not contain Cargo.toml",
+                crate_path.display()
+            )
+            .into());
+        }
+        let install_root = env::var_os("CLAW_INSTALL_ROOT")
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local")))
+            .ok_or("cannot determine install root; set CLAW_INSTALL_ROOT or HOME")?;
+        let install_root_string = install_root.display().to_string();
+        run_command(
+            "cargo",
+            &[
+                "install",
+                "--path",
+                "rust/crates/rusty-claude-cli",
+                "--root",
+                &install_root_string,
+                "--force",
+            ],
+            &repo,
+        )?;
+    }
+
+    println!("claw-code update complete.");
+    Ok(())
+}
+
+fn resolve_update_repo(repo_arg: Option<&Path>) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let start = match repo_arg {
+        Some(path) => path.to_path_buf(),
+        None => env::current_dir()?,
+    };
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(&start)
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "{} is not inside a git checkout. Use `claw update --repo /path/to/claw-code`.",
+            start.display()
+        )
+        .into());
+    }
+    Ok(PathBuf::from(
+        String::from_utf8_lossy(&output.stdout).trim().to_string(),
+    ))
+}
+
+fn resolve_origin_default_ref(repo: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let output = Command::new("git")
+        .args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+        .current_dir(repo)
+        .output()?;
+    if output.status.success() {
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !value.is_empty() {
+            return Ok(value);
+        }
+    }
+    for candidate in ["origin/main", "origin/master"] {
+        let status = Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", candidate])
+            .current_dir(repo)
+            .status()?;
+        if status.success() {
+            return Ok(candidate.to_string());
+        }
+    }
+    Err("cannot resolve origin default branch; expected origin/main or origin/master".into())
+}
+
+fn run_command(program: &str, args: &[&str], cwd: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    println!("$ {program} {}", args.join(" "));
+    let status = Command::new(program).args(args).current_dir(cwd).status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{program} {} failed with status {status}", args.join(" ")).into())
+    }
 }
 
 /// Validate model syntax at parse time.
@@ -2213,7 +2614,7 @@ fn check_auth_health() -> DiagnosticCheck {
                     token_set.scopes.join(",")
                 }
             ),
-            "Suggested action  set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN; `claw login` is removed"
+            "Suggested action  set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN for Anthropic, or run `claw login` to configure an OpenAI-compatible provider"
                 .to_string(),
         ])
         .with_data(Map::from_iter([
@@ -3748,6 +4149,7 @@ fn run_resume_command(
         | SlashCommand::PrivacySettings
         | SlashCommand::Plan { .. }
         | SlashCommand::Review { .. }
+        | SlashCommand::Team { .. }
         | SlashCommand::Tasks { .. }
         | SlashCommand::Theme { .. }
         | SlashCommand::Voice { .. }
@@ -4591,7 +4993,7 @@ impl LiveCli {
                     TerminalRenderer::new().color_theme(),
                     &mut stdout,
                 )?;
-                
+
                 // ============================================================================
                 // Auto-compact retry on context window errors
                 // ============================================================================
@@ -4610,7 +5012,7 @@ impl LiveCli {
                 // - "Context window blocked"
                 // - "This model's maximum context length is X tokens..."
                 // ============================================================================
-                
+
                 let error_str = error.to_string();
                 // Detect context window overflow. Some providers (e.g. OpenAI-compat backends)
                 // return 400 with "no parseable body" instead of a proper context_length_exceeded
@@ -4618,7 +5020,7 @@ impl LiveCli {
                 let is_context_window = error_str.contains("context_window")
                     || error_str.contains("Context window")
                     || error_str.contains("no parseable body");
-                
+
                 if is_context_window {
                     // A single compaction pass may not free enough context space.
                     // Progressive retry: each round preserves fewer recent messages (4→2→1→0),
@@ -4626,7 +5028,7 @@ impl LiveCli {
                     // Max 4 rounds before giving up and surfacing the error to the user.
                     let max_compact_rounds = 4;
                     let preserve_schedule = [4, 2, 1, 0];
-                    
+
                     for round in 0..max_compact_rounds {
                         let preserve = preserve_schedule[round];
                         println!(
@@ -4635,7 +5037,7 @@ impl LiveCli {
                             max_compact_rounds,
                             preserve
                         );
-                        
+
                         // Run Trident pipeline then summary-based compaction
                         let result = runtime::trident::trident_compact_session(
                             runtime.session(),
@@ -4646,38 +5048,53 @@ impl LiveCli {
                             &runtime::trident::TridentConfig::default(),
                         );
                         let removed = result.removed_message_count;
-                        
+
                         if removed == 0 && round > 0 {
                             // No more messages to compact — further rounds won't help
                             println!("  No further compaction possible.");
                             break;
                         }
-                        
+
                         if removed > 0 {
-                            println!("{}", format_compact_report(removed, result.compacted_session.messages.len(), false));
+                            println!(
+                                "{}",
+                                format_compact_report(
+                                    removed,
+                                    result.compacted_session.messages.len(),
+                                    false
+                                )
+                            );
                         }
-                        
+
                         // Without this, prepare_turn_runtime() reads from self.runtime.session()
                         // which still holds the ORIGINAL un-compacted session, so every retry round
                         // would send the same bloated request — compaction was wasted.
                         *self.runtime.session_mut() = result.compacted_session.clone();
-                        
+
                         // Build a new runtime with the compacted session and retry
-                        let (mut new_runtime, hook_abort_monitor) = self.prepare_turn_runtime(true)?;
+                        let (mut new_runtime, hook_abort_monitor) =
+                            self.prepare_turn_runtime(true)?;
                         drop(hook_abort_monitor);
-                        
+
                         let mut rp = CliPermissionPrompter::new(self.permission_mode);
                         match new_runtime.run_turn(input, Some(&mut rp)) {
                             Ok(summary) => {
                                 self.replace_runtime(new_runtime)?;
                                 spinner.finish(
-                                    if round == 0 { "✨ Done (after auto-compact)" } else { "✨ Done (after aggressive auto-compact)" },
+                                    if round == 0 {
+                                        "✨ Done (after auto-compact)"
+                                    } else {
+                                        "✨ Done (after aggressive auto-compact)"
+                                    },
                                     TerminalRenderer::new().color_theme(),
                                     &mut stdout,
                                 )?;
                                 println!();
                                 if let Some(event) = summary.auto_compaction {
-                                    println!("{}", format_auto_compaction_notice(event.removed_message_count));
+                                    println!(
+                                        "{}",
+                                        format_auto_compaction_notice(event.removed_message_count)
+                                    );
                                 }
                                 self.persist_session()?;
                                 return Ok(());
@@ -4687,7 +5104,7 @@ impl LiveCli {
                                 let still_context_window = retry_str.contains("context_window")
                                     || retry_str.contains("Context window")
                                     || retry_str.contains("no parseable body");
-                                
+
                                 if still_context_window && round + 1 < max_compact_rounds {
                                     // The compacted session was still too large for the model's context.
                                     // Shut down the old runtime, adopt the partially-compacted one,
@@ -4696,14 +5113,14 @@ impl LiveCli {
                                     runtime = new_runtime;
                                     continue;
                                 }
-                                
+
                                 // Not a context window error, or out of rounds
                                 return Err(Box::new(retry_error));
                             }
                         }
                     }
                 }
-                
+
                 // If not a context window error, return original error
                 Err(Box::new(error))
             }
@@ -4924,8 +5341,13 @@ impl LiveCli {
                 println!("{}", format_cost_report(usage));
                 false
             }
-            SlashCommand::Login
-            | SlashCommand::Logout
+            SlashCommand::Login => {
+                if let Some(model) = run_login_wizard()? {
+                    self.set_model(Some(model))?;
+                }
+                false
+            }
+            SlashCommand::Logout
             | SlashCommand::Vim
             | SlashCommand::Upgrade
             | SlashCommand::Share
@@ -4946,6 +5368,7 @@ impl LiveCli {
             | SlashCommand::PrivacySettings
             | SlashCommand::Plan { .. }
             | SlashCommand::Review { .. }
+            | SlashCommand::Team { .. }
             | SlashCommand::Tasks { .. }
             | SlashCommand::Theme { .. }
             | SlashCommand::Voice { .. }
@@ -8362,7 +8785,6 @@ fn collect_prompt_cache_events(summary: &runtime::TurnSummary) -> Vec<serde_json
 /// in this build. Used to filter both REPL completions and help output so the
 /// discovery surface only shows commands that actually work (ROADMAP #39).
 const STUB_COMMANDS: &[&str] = &[
-    "login",
     "logout",
     "vim",
     "upgrade",
@@ -9337,6 +9759,16 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         out,
         "      Show ACP/Zed editor integration status (currently unsupported; aliases: --acp, -acp)"
     )?;
+    writeln!(out, "  claw login")?;
+    writeln!(
+        out,
+        "      Configure an OpenAI-compatible model provider profile"
+    )?;
+    writeln!(out, "  claw update [--repo PATH] [--no-install]")?;
+    writeln!(
+        out,
+        "      Fetch origin, merge the upstream default branch, and reinstall claw"
+    )?;
     writeln!(out, "      Source of truth: {OFFICIAL_REPO_SLUG}")?;
     writeln!(
         out,
@@ -9480,7 +9912,8 @@ mod tests {
         render_memory_report, render_prompt_history_report, render_repl_help, render_resume_usage,
         render_session_list, render_session_markdown, resolve_model_alias,
         resolve_model_alias_with_config, resolve_repl_model, resolve_session_reference,
-        response_to_events, resume_supported_slash_commands, run_resume_command, short_tool_id,
+        response_to_events, resume_supported_slash_commands, run_resume_command,
+        save_model_provider_profile, short_tool_id,
         slash_command_completion_candidates_with_sessions, split_error_hint, status_context,
         status_json_value, summarize_tool_payload_for_markdown, try_resolve_bare_skill_prompt,
         validate_no_args, write_mcp_server_fixture, CliAction, CliOutputFormat, CliToolExecutor,
@@ -9669,7 +10102,7 @@ mod tests {
                 retryable: false,
                 suggested_action: None,
                 retry_after: None,
-}),
+            }),
         };
 
         let rendered = format_user_visible_api_error("session-issue-32", &error);
@@ -10227,6 +10660,62 @@ mod tests {
     }
 
     #[test]
+    fn login_profile_writer_persists_model_provider_settings() {
+        // given
+        let _guard = env_lock();
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let config_home = root.join("config-home");
+        std::fs::create_dir_all(&cwd).expect("project dir should exist");
+        std::fs::create_dir_all(&config_home).expect("config home should exist");
+        let original_config_home = std::env::var("CLAW_CONFIG_HOME").ok();
+        std::env::set_var("CLAW_CONFIG_HOME", &config_home);
+
+        // when
+        with_current_dir(&cwd, || {
+            save_model_provider_profile(
+                "moonshot",
+                "https://api.moonshot.ai/v1",
+                "MOONSHOT_API_KEY",
+                Some("test-token"),
+                &["kimi-k2.5".to_string(), "kimi-k2-thinking".to_string()],
+                "kimi-k2.5",
+            )
+            .expect("profile should save");
+        });
+
+        // then
+        let settings_path = config_home.join("settings.json");
+        let settings = std::fs::read_to_string(&settings_path).expect("settings should exist");
+        let json: serde_json::Value =
+            serde_json::from_str(&settings).expect("settings should parse as json");
+        assert_eq!(json["model"], "moonshot/kimi-k2.5");
+        assert_eq!(
+            json["modelProviders"]["moonshot"]["type"],
+            "openai-compatible"
+        );
+        assert_eq!(
+            json["modelProviders"]["moonshot"]["baseUrl"],
+            "https://api.moonshot.ai/v1"
+        );
+        assert_eq!(
+            json["modelProviders"]["moonshot"]["apiKeyEnv"],
+            "MOONSHOT_API_KEY"
+        );
+        assert_eq!(json["modelProviders"]["moonshot"]["apiKey"], "test-token");
+        assert_eq!(
+            json["modelProviders"]["moonshot"]["defaultModel"],
+            "kimi-k2.5"
+        );
+
+        match original_config_home {
+            Some(value) => std::env::set_var("CLAW_CONFIG_HOME", value),
+            None => std::env::remove_var("CLAW_CONFIG_HOME"),
+        }
+        std::fs::remove_dir_all(root).expect("temp config root should clean up");
+    }
+
+    #[test]
     fn parses_version_flags_without_initializing_prompt_mode() {
         assert_eq!(
             parse_args(&["--version".to_string()]).expect("args should parse"),
@@ -10375,9 +10864,24 @@ mod tests {
     }
 
     #[test]
-    fn removed_login_and_logout_subcommands_error_helpfully() {
-        let login = parse_args(&["login".to_string()]).expect_err("login should be removed");
-        assert!(login.contains("ANTHROPIC_API_KEY"));
+    fn login_subcommand_parses_and_logout_errors_helpfully() {
+        assert_eq!(
+            parse_args(&["login".to_string()]).expect("login should parse"),
+            CliAction::Login
+        );
+        assert_eq!(
+            parse_args(&[
+                "update".to_string(),
+                "--repo".to_string(),
+                "/tmp/claw-code".to_string(),
+                "--no-install".to_string(),
+            ])
+            .expect("update should parse"),
+            CliAction::Update {
+                repo: Some(PathBuf::from("/tmp/claw-code")),
+                install: false,
+            }
+        );
         let logout = parse_args(&["logout".to_string()]).expect_err("logout should be removed");
         assert!(logout.contains("ANTHROPIC_AUTH_TOKEN"));
         assert_eq!(
@@ -12095,9 +12599,10 @@ mod tests {
         assert!(help.contains("claw mcp"));
         assert!(help.contains("claw skills"));
         assert!(help.contains("claw /skills"));
+        assert!(help.contains("claw login"));
+        assert!(help.contains("claw update [--repo PATH] [--no-install]"));
         assert!(help.contains("ultraworkers/claw-code"));
         assert!(help.contains("cargo install claw-code"));
-        assert!(!help.contains("claw login"));
         assert!(!help.contains("claw logout"));
     }
 
