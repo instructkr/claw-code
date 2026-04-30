@@ -105,6 +105,18 @@ fn inventory_commands_emit_structured_json_when_requested() {
     let skills = assert_json_command(&root, &["--output-format", "json", "skills"]);
     assert_eq!(skills["kind"], "skills");
     assert_eq!(skills["action"], "list");
+
+    let plugins = assert_json_command(&root, &["--output-format", "json", "plugins"]);
+    assert_eq!(plugins["kind"], "plugin");
+    assert_eq!(plugins["action"], "list");
+    assert!(
+        plugins["reload_runtime"].is_boolean(),
+        "plugins reload_runtime should be a boolean"
+    );
+    assert!(
+        plugins["target"].is_null(),
+        "plugins target should be null when no plugin is targeted"
+    );
 }
 
 #[test]
