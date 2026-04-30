@@ -3556,7 +3556,8 @@ fn run_resume_command(
             let loader = ConfigLoader::default_for(&cwd);
             let runtime_config = loader.load()?;
             let mut manager = build_plugin_manager(&cwd, &loader, &runtime_config);
-            let result = handle_plugins_slash_command(action.as_deref(), target.as_deref(), &mut manager)?;
+            let result =
+                handle_plugins_slash_command(action.as_deref(), target.as_deref(), &mut manager)?;
             let action_str = action.as_deref().unwrap_or("list");
             let json = serde_json::json!({
                 "kind": "plugin",
