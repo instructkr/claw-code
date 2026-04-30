@@ -3543,9 +3543,10 @@ fn run_resume_command(
             })
         }
         SlashCommand::Plugins { action, target } => {
-            // Only list/help are supported in resume mode (no runtime to reload)
+            // Only list is supported in resume mode (no runtime to reload)
             match action.as_deref() {
-                Some("install") | Some("uninstall") | Some("enable") | Some("disable") => {
+                Some("install") | Some("uninstall") | Some("enable") | Some("disable")
+                | Some("update") => {
                     return Err(
                         "resumed /plugins mutations are interactive-only; start `claw` and run `/plugins` in the REPL".into(),
                     );
