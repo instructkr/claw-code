@@ -1,3 +1,4 @@
+mod agent;
 mod search;
 mod team;
 
@@ -38,6 +39,10 @@ use search::{execute_web_fetch, execute_web_search, WebFetchInput, WebSearchInpu
 use team::{
     agent_mailbox_dir, append_team_event, claim_task, claims_dir, expand_team_mode, list_claims,
     release_claim, TeamInboxReporter,
+};
+use agent::{
+    agent_store_dir, canonical_tool_token, iso8601_now, make_agent_id, normalize_subagent_type,
+    slugify_agent_name, AgentInput, AgentOutput,
 };
 
 /// Global task registry shared across tool invocations within a session.
@@ -3400,19 +3405,6 @@ struct SkillInput {
 }
 
 #[derive(Debug, Deserialize)]
-struct AgentInput {
-    description: String,
-    prompt: String,
-    subagent_type: Option<String>,
-    name: Option<String>,
-    model: Option<String>,
-    #[serde(default)]
-    team_id: Option<String>,
-    #[serde(default)]
-    task_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct ToolSearchInput {
     query: String,
     max_results: Option<usize>,
@@ -3800,40 +3792,6 @@ struct SkillOutput {
     args: Option<String>,
     description: Option<String>,
     prompt: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AgentOutput {
-    #[serde(rename = "agentId")]
-    agent_id: String,
-    name: String,
-    description: String,
-    #[serde(rename = "subagentType")]
-    subagent_type: Option<String>,
-    model: Option<String>,
-    status: String,
-    #[serde(rename = "outputFile")]
-    output_file: String,
-    #[serde(rename = "manifestFile")]
-    manifest_file: String,
-    #[serde(rename = "createdAt")]
-    created_at: String,
-    #[serde(rename = "startedAt", skip_serializing_if = "Option::is_none")]
-    started_at: Option<String>,
-    #[serde(rename = "completedAt", skip_serializing_if = "Option::is_none")]
-    completed_at: Option<String>,
-    #[serde(rename = "laneEvents", default, skip_serializing_if = "Vec::is_empty")]
-    lane_events: Vec<LaneEvent>,
-    #[serde(rename = "currentBlocker", skip_serializing_if = "Option::is_none")]
-    current_blocker: Option<LaneEventBlocker>,
-    #[serde(rename = "derivedState")]
-    derived_state: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-    #[serde(rename = "teamId", skip_serializing_if = "Option::is_none")]
-    team_id: Option<String>,
-    #[serde(rename = "taskId", skip_serializing_if = "Option::is_none")]
-    task_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -5973,82 +5931,6 @@ fn normalize_tool_search_query(query: &str) -> String {
         .map(canonical_tool_token)
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn canonical_tool_token(value: &str) -> String {
-    let mut canonical = value
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-    if let Some(stripped) = canonical.strip_suffix("tool") {
-        canonical = stripped.to_string();
-    }
-    canonical
-}
-
-fn agent_store_dir() -> Result<std::path::PathBuf, String> {
-    if let Ok(path) = std::env::var("CLAWD_AGENT_STORE") {
-        return Ok(std::path::PathBuf::from(path));
-    }
-    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-    if let Some(workspace_root) = cwd.ancestors().nth(2) {
-        return Ok(workspace_root.join(".clawd-agents"));
-    }
-    Ok(cwd.join(".clawd-agents"))
-}
-
-fn make_agent_id() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("agent-{nanos}")
-}
-
-fn slugify_agent_name(description: &str) -> String {
-    let mut out = description
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    while out.contains("--") {
-        out = out.replace("--", "-");
-    }
-    out.trim_matches('-').chars().take(32).collect()
-}
-
-fn normalize_subagent_type(subagent_type: Option<&str>) -> String {
-    let trimmed = subagent_type.map(str::trim).unwrap_or_default();
-    if trimmed.is_empty() {
-        return String::from("general-purpose");
-    }
-
-    match canonical_tool_token(trimmed).as_str() {
-        "general" | "generalpurpose" | "generalpurposeagent" => String::from("general-purpose"),
-        "explore" | "explorer" | "exploreagent" => String::from("Explore"),
-        "plan" | "planagent" => String::from("Plan"),
-        "verification" | "verificationagent" | "verify" | "verifier" => {
-            String::from("Verification")
-        }
-        "reviewer" | "review" | "reviewagent" => String::from("Reviewer"),
-        "clawguide" | "clawguideagent" | "guide" => String::from("claw-guide"),
-        "statusline" | "statuslinesetup" => String::from("statusline-setup"),
-        _ => trimmed.to_string(),
-    }
-}
-
-fn iso8601_now() -> String {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        .to_string()
 }
 
 #[allow(clippy::too_many_lines)]
