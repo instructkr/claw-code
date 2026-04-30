@@ -40,13 +40,18 @@ use api::{
 };
 
 use cli::{
-    config_model_for_current_dir, default_permission_mode, is_help_flag, normalize_allowed_tools,
+    config_model_for_current_dir, default_permission_mode,
+    format_auto_compaction_notice, format_bughunter_report, format_commit_preflight_report,
+    format_commit_skipped_report, format_compact_report, format_cost_report, format_issue_report,
+    format_model_report, format_model_switch_report, format_permissions_report,
+    format_permissions_switch_report, format_pr_report, format_resume_report, format_sandbox_report,
+    format_status_report, format_ultraplan_report, is_help_flag, normalize_allowed_tools,
     normalize_permission_mode, parse_args, parse_permission_mode_arg, permission_mode_from_label,
-    permission_mode_from_resolved, render_doctor_report, resolve_model_alias,
+    permission_mode_from_resolved, render_doctor_report, render_resume_usage, resolve_model_alias,
     resolve_model_alias_with_config, run_doctor, validate_model_syntax, AllowedToolSet,
     BUILD_TARGET, CliAction, CliOutputFormat, CLI_OPTION_SUGGESTIONS, DEPRECATED_INSTALL_COMMAND,
-    LATEST_SESSION_REFERENCE, OFFICIAL_REPO_SLUG, OFFICIAL_REPO_URL, LocalHelpTopic,
-    ModelProvenance, ModelSource,
+    GitWorkspaceSummary, LATEST_SESSION_REFERENCE, OFFICIAL_REPO_SLUG, OFFICIAL_REPO_URL,
+    LocalHelpTopic, ModelProvenance, ModelSource, StatusContext, StatusUsage,
 };
 use commands::{
     classify_skills_slash_command, handle_agents_slash_command, handle_agents_slash_command_json,
@@ -860,76 +865,6 @@ struct ResumeCommandOutcome {
     json: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone)]
-struct StatusContext {
-    cwd: PathBuf,
-    session_path: Option<PathBuf>,
-    loaded_config_files: usize,
-    discovered_config_files: usize,
-    memory_file_count: usize,
-    project_root: Option<PathBuf>,
-    git_branch: Option<String>,
-    git_summary: GitWorkspaceSummary,
-    sandbox_status: runtime::SandboxStatus,
-    /// #143: when `.claw.json` (or another loaded config file) fails to parse,
-    /// we capture the parse error here and still populate every field that
-    /// doesn't depend on runtime config (workspace, git, sandbox defaults,
-    /// discovery counts). Top-level JSON output then reports
-    /// `status: "degraded"` so claws can distinguish "status ran but config
-    /// is broken" from "status ran cleanly".
-    config_load_error: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct StatusUsage {
-    message_count: usize,
-    turns: u32,
-    latest: TokenUsage,
-    cumulative: TokenUsage,
-    estimated_tokens: usize,
-}
-
-#[allow(clippy::struct_field_names)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct GitWorkspaceSummary {
-    changed_files: usize,
-    staged_files: usize,
-    unstaged_files: usize,
-    untracked_files: usize,
-    conflicted_files: usize,
-}
-
-impl GitWorkspaceSummary {
-    fn is_clean(self) -> bool {
-        self.changed_files == 0
-    }
-
-    fn headline(self) -> String {
-        if self.is_clean() {
-            "clean".to_string()
-        } else {
-            let mut details = Vec::new();
-            if self.staged_files > 0 {
-                details.push(format!("{} staged", self.staged_files));
-            }
-            if self.unstaged_files > 0 {
-                details.push(format!("{} unstaged", self.unstaged_files));
-            }
-            if self.untracked_files > 0 {
-                details.push(format!("{} untracked", self.untracked_files));
-            }
-            if self.conflicted_files > 0 {
-                details.push(format!("{} conflicted", self.conflicted_files));
-            }
-            format!(
-                "dirty · {} files · {}",
-                self.changed_files,
-                details.join(", ")
-            )
-        }
-    }
-}
-
 #[cfg(test)]
 fn format_unknown_slash_command_message(name: &str) -> String {
     let suggestions = suggest_slash_commands(name);
@@ -945,138 +880,6 @@ fn format_unknown_slash_command_message(name: &str) -> String {
     }
     message.push_str(" Use /help to list available commands.");
     message
-}
-
-fn format_model_report(model: &str, message_count: usize, turns: u32) -> String {
-    format!(
-        "Model
-  Current model    {model}
-  Session messages {message_count}
-  Session turns    {turns}
-
-Usage
-  Inspect current model with /model
-  Switch models with /model <name>"
-    )
-}
-
-fn format_model_switch_report(previous: &str, next: &str, message_count: usize) -> String {
-    format!(
-        "Model updated
-  Previous         {previous}
-  Current          {next}
-  Preserved msgs   {message_count}"
-    )
-}
-
-fn format_permissions_report(mode: &str) -> String {
-    let modes = [
-        ("read-only", "Read/search tools only", mode == "read-only"),
-        (
-            "workspace-write",
-            "Edit files inside the workspace",
-            mode == "workspace-write",
-        ),
-        (
-            "danger-full-access",
-            "Unrestricted tool access",
-            mode == "danger-full-access",
-        ),
-    ]
-    .into_iter()
-    .map(|(name, description, is_current)| {
-        let marker = if is_current {
-            "● current"
-        } else {
-            "○ available"
-        };
-        format!("  {name:<18} {marker:<11} {description}")
-    })
-    .collect::<Vec<_>>()
-    .join(
-        "
-",
-    );
-
-    format!(
-        "Permissions
-  Active mode      {mode}
-  Mode status      live session default
-
-Modes
-{modes}
-
-Usage
-  Inspect current mode with /permissions
-  Switch modes with /permissions <mode>"
-    )
-}
-
-fn format_permissions_switch_report(previous: &str, next: &str) -> String {
-    format!(
-        "Permissions updated
-  Result           mode switched
-  Previous mode    {previous}
-  Active mode      {next}
-  Applies to       subsequent tool calls
-  Usage            /permissions to inspect current mode"
-    )
-}
-
-fn format_cost_report(usage: TokenUsage) -> String {
-    format!(
-        "Cost
-  Input tokens     {}
-  Output tokens    {}
-  Cache create     {}
-  Cache read       {}
-  Total tokens     {}",
-        usage.input_tokens,
-        usage.output_tokens,
-        usage.cache_creation_input_tokens,
-        usage.cache_read_input_tokens,
-        usage.total_tokens(),
-    )
-}
-
-fn format_resume_report(session_path: &str, message_count: usize, turns: u32) -> String {
-    format!(
-        "Session resumed
-  Session file     {session_path}
-  Messages         {message_count}
-  Turns            {turns}"
-    )
-}
-
-fn render_resume_usage() -> String {
-    format!(
-        "Resume
-  Usage            /resume <session-path|session-id|{LATEST_SESSION_REFERENCE}>
-  Auto-save        .claw/sessions/<session-id>.{PRIMARY_SESSION_EXTENSION}
-  Tip              use /session list to inspect saved sessions"
-    )
-}
-
-fn format_compact_report(removed: usize, resulting_messages: usize, skipped: bool) -> String {
-    if skipped {
-        format!(
-            "Compact
-  Result           skipped
-  Reason           session below compaction threshold
-  Messages kept    {resulting_messages}"
-        )
-    } else {
-        format!(
-            "Compact
-  Result           compacted
-  Messages removed {removed}
-  Messages kept    {resulting_messages}"
-        )
-    }
-}
-
-fn format_auto_compaction_notice(removed: usize) -> String {
-    format!("[auto-compacted: removed {removed} messages]")
 }
 
 fn parse_git_status_metadata(status: Option<&str>) -> (Option<PathBuf>, Option<String>) {
@@ -3967,167 +3770,6 @@ fn status_context(
     })
 }
 
-fn format_status_report(
-    model: &str,
-    usage: StatusUsage,
-    permission_mode: &str,
-    context: &StatusContext,
-    // #148: optional model provenance to surface in a `Model source` line.
-    // Callers without provenance (legacy resume paths) pass None and the
-    // source line is omitted for backward compat.
-    provenance: Option<&ModelProvenance>,
-) -> String {
-    // #143: if config failed to parse, surface a degraded banner at the top
-    // of the text report so humans see the parse error before the body, while
-    // the body below still reports everything that could be resolved without
-    // config (workspace, git, sandbox defaults, etc.).
-    let status_line = if context.config_load_error.is_some() {
-        "Status (degraded)"
-    } else {
-        "Status"
-    };
-    let mut blocks: Vec<String> = Vec::new();
-    if let Some(err) = context.config_load_error.as_deref() {
-        blocks.push(format!(
-            "Config load error\n  Status           fail\n  Summary          runtime config failed to load; reporting partial status\n  Details          {err}\n  Hint             `claw doctor` classifies config parse errors; fix the listed field and rerun"
-        ));
-    }
-    // #148: render Model source line after Model, showing where the string
-    // came from (flag / env / config / default) and the raw input if any.
-    let model_source_line = provenance
-        .map(|p| match &p.raw {
-            Some(raw) if raw != model => {
-                format!("\n  Model source     {} (raw: {raw})", p.source.as_str())
-            }
-            Some(_) => format!("\n  Model source     {}", p.source.as_str()),
-            None => format!("\n  Model source     {}", p.source.as_str()),
-        })
-        .unwrap_or_default();
-    blocks.extend([
-        format!(
-            "{status_line}
-  Model            {model}{model_source_line}
-  Permission mode  {permission_mode}
-  Messages         {}
-  Turns            {}
-  Estimated tokens {}",
-            usage.message_count, usage.turns, usage.estimated_tokens,
-        ),
-        format!(
-            "Usage
-  Latest total     {}
-  Cumulative input {}
-  Cumulative output {}
-  Cumulative total {}",
-            usage.latest.total_tokens(),
-            usage.cumulative.input_tokens,
-            usage.cumulative.output_tokens,
-            usage.cumulative.total_tokens(),
-        ),
-        format!(
-            "Workspace
-  Cwd              {}
-  Project root     {}
-  Git branch       {}
-  Git state        {}
-  Changed files    {}
-  Staged           {}
-  Unstaged         {}
-  Untracked        {}
-  Session          {}
-  Config files     loaded {}/{}
-  Memory files     {}
-  Suggested flow   /status → /diff → /commit",
-            context.cwd.display(),
-            context
-                .project_root
-                .as_ref()
-                .map_or_else(|| "unknown".to_string(), |path| path.display().to_string()),
-            context.git_branch.as_deref().unwrap_or("unknown"),
-            context.git_summary.headline(),
-            context.git_summary.changed_files,
-            context.git_summary.staged_files,
-            context.git_summary.unstaged_files,
-            context.git_summary.untracked_files,
-            context.session_path.as_ref().map_or_else(
-                || "live-repl".to_string(),
-                |path| path.display().to_string()
-            ),
-            context.loaded_config_files,
-            context.discovered_config_files,
-            context.memory_file_count,
-        ),
-        format_sandbox_report(&context.sandbox_status),
-    ]);
-    blocks.join("\n\n")
-}
-
-fn format_sandbox_report(status: &runtime::SandboxStatus) -> String {
-    format!(
-        "Sandbox
-  Enabled           {}
-  Active            {}
-  Supported         {}
-  In container      {}
-  Requested ns      {}
-  Active ns         {}
-  Requested net     {}
-  Active net        {}
-  Filesystem mode   {}
-  Filesystem active {}
-  Allowed mounts    {}
-  Markers           {}
-  Fallback reason   {}",
-        status.enabled,
-        status.active,
-        status.supported,
-        status.in_container,
-        status.requested.namespace_restrictions,
-        status.namespace_active,
-        status.requested.network_isolation,
-        status.network_active,
-        status.filesystem_mode.as_str(),
-        status.filesystem_active,
-        if status.allowed_mounts.is_empty() {
-            "<none>".to_string()
-        } else {
-            status.allowed_mounts.join(", ")
-        },
-        if status.container_markers.is_empty() {
-            "<none>".to_string()
-        } else {
-            status.container_markers.join(", ")
-        },
-        status
-            .fallback_reason
-            .clone()
-            .unwrap_or_else(|| "<none>".to_string()),
-    )
-}
-
-fn format_commit_preflight_report(branch: Option<&str>, summary: GitWorkspaceSummary) -> String {
-    format!(
-        "Commit
-  Result           ready
-  Branch           {}
-  Workspace        {}
-  Changed files    {}
-  Action           create a git commit from the current workspace changes",
-        branch.unwrap_or("unknown"),
-        summary.headline(),
-        summary.changed_files,
-    )
-}
-
-fn format_commit_skipped_report() -> String {
-    "Commit
-  Result           skipped
-  Reason           no workspace changes
-  Action           create a git commit from the current workspace changes
-  Next             /status to inspect context · /diff to inspect repo changes"
-        .to_string()
-}
-
 fn print_sandbox_status_snapshot(
     output_format: CliOutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -4710,47 +4352,6 @@ fn validate_no_args(
         .into());
     }
     Ok(())
-}
-
-fn format_bughunter_report(scope: Option<&str>) -> String {
-    format!(
-        "Bughunter
-  Scope            {}
-  Action           inspect the selected code for likely bugs and correctness issues
-  Output           findings should include file paths, severity, and suggested fixes",
-        scope.unwrap_or("the current repository")
-    )
-}
-
-fn format_ultraplan_report(task: Option<&str>) -> String {
-    format!(
-        "Ultraplan
-  Task             {}
-  Action           break work into a multi-step execution plan
-  Output           plan should cover goals, risks, sequencing, verification, and rollback",
-        task.unwrap_or("the current repo work")
-    )
-}
-
-fn format_pr_report(branch: &str, context: Option<&str>) -> String {
-    format!(
-        "PR
-  Branch           {branch}
-  Context          {}
-  Action           draft or create a pull request for the current branch
-  Output           title and markdown body suitable for GitHub",
-        context.unwrap_or("none")
-    )
-}
-
-fn format_issue_report(context: Option<&str>) -> String {
-    format!(
-        "Issue
-  Context          {}
-  Action           draft or create a GitHub issue from the current context
-  Output           title and markdown body suitable for GitHub",
-        context.unwrap_or("none")
-    )
 }
 
 fn git_output(args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
