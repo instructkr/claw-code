@@ -449,21 +449,13 @@ You can also use the provider name alone when it has `defaultModel` configured:
 
 Prefer `apiKeyEnv` so secrets stay out of source-controlled project settings. `apiKey` is supported for local-only files when an environment variable is not practical.
 
-### Updating a local fork
+### Updating claw-code
 
-Use `claw update` from inside the `claw-code` checkout to fetch `origin`, merge the upstream default branch with `git merge --autostash`, and reinstall the local `claw` binary:
+Use `claw update` to install the latest `claw-code` from the canonical source repository. The command downloads a fresh temporary copy of `https://github.com/ultraworkers/claw-code`, installs `rust/crates/rusty-claude-cli`, and removes the temporary checkout. It does not merge the current branch or mutate your local fork.
 
 ```bash
 claw update
 ```
-
-If you run it from another directory, point it at the checkout:
-
-```bash
-claw update --repo /path/to/claw-code
-```
-
-Use `--no-install` when you only want to merge upstream changes without reinstalling the binary.
 
 ### Tested models and aliases
 

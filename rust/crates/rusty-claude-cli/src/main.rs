@@ -435,7 +435,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
-        CliAction::Update { repo, install } => run_update(repo.as_deref(), install)?,
+        CliAction::Update => run_update()?,
         CliAction::Acp { output_format } => print_acp_status(output_format)?,
         CliAction::State { output_format } => run_worker_state(output_format)?,
         CliAction::Init { output_format } => run_init(output_format)?,
@@ -561,10 +561,7 @@ enum CliAction {
         output_format: CliOutputFormat,
     },
     Login,
-    Update {
-        repo: Option<PathBuf>,
-        install: bool,
-    },
+    Update,
     Acp {
         output_format: CliOutputFormat,
     },
@@ -1186,6 +1183,83 @@ fn removed_auth_surface_error(command_name: &str) -> String {
     )
 }
 
+fn run_update() -> Result<(), Box<dyn std::error::Error>> {
+    let update_dir = env::temp_dir().join(format!("claw-code-update-{}", std::process::id()));
+    if update_dir.exists() {
+        fs::remove_dir_all(&update_dir)?;
+    }
+
+    println!("Updating claw-code from {OFFICIAL_REPO_URL}");
+    run_command(
+        "git",
+        &[
+            "clone",
+            "--depth",
+            "1",
+            OFFICIAL_REPO_URL,
+            update_dir
+                .to_str()
+                .ok_or("temporary update path is not valid UTF-8")?,
+        ],
+        Path::new("."),
+    )?;
+
+    let latest_sha = git_rev_parse(&update_dir, "HEAD")?;
+    let crate_path = update_dir.join("rust/crates/rusty-claude-cli");
+    if !crate_path.join("Cargo.toml").exists() {
+        return Err(format!(
+            "cannot install claw: {} does not contain Cargo.toml",
+            crate_path.display()
+        )
+        .into());
+    }
+    let install_root = env::var_os("CLAW_INSTALL_ROOT")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local")))
+        .ok_or("cannot determine install root; set CLAW_INSTALL_ROOT or HOME")?;
+    let install_root_string = install_root.display().to_string();
+    run_command(
+        "cargo",
+        &[
+            "install",
+            "--path",
+            "rust/crates/rusty-claude-cli",
+            "--root",
+            &install_root_string,
+            "--force",
+        ],
+        &update_dir,
+    )?;
+
+    fs::remove_dir_all(&update_dir).ok();
+    println!("Update complete. Installed claw-code at {latest_sha}.");
+    Ok(())
+}
+
+fn git_rev_parse(repo: &Path, rev: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let output = Command::new("git")
+        .args(["rev-parse", rev])
+        .current_dir(repo)
+        .output()?;
+    if output.status.success() {
+        let value = String::from_utf8(output.stdout)?.trim().to_string();
+        if !value.is_empty() {
+            return Ok(value);
+        }
+    }
+    Err(format!("cannot resolve git revision {rev} in {}", repo.display()).into())
+}
+
+fn run_command(program: &str, args: &[&str], cwd: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    println!("$ {program} {}", args.join(" "));
+    let status = Command::new(program).args(args).current_dir(cwd).status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{program} exited with status {status}").into())
+    }
+}
+
 fn parse_acp_args(args: &[String], output_format: CliOutputFormat) -> Result<CliAction, String> {
     match args {
         [] => Ok(CliAction::Acp { output_format }),
@@ -1197,40 +1271,19 @@ fn parse_acp_args(args: &[String], output_format: CliOutputFormat) -> Result<Cli
 }
 
 fn parse_update_args(args: &[String]) -> Result<CliAction, String> {
-    let mut repo = None;
-    let mut install = true;
-    let mut index = 0;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--repo" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| "missing value for claw update --repo".to_string())?;
-                repo = Some(PathBuf::from(value));
-                index += 2;
-            }
-            flag if flag.starts_with("--repo=") => {
-                repo = Some(PathBuf::from(&flag[7..]));
-                index += 1;
-            }
-            "--no-install" => {
-                install = false;
-                index += 1;
-            }
-            "--help" | "-h" => {
-                return Err(
-                    "Usage: claw update [--repo PATH] [--no-install]\nFetch origin, merge origin/main with --autostash, then reinstall the local claw binary."
-                        .to_string(),
-                );
-            }
-            other => {
-                return Err(format!(
-                    "unexpected argument for claw update: {other}. Usage: claw update [--repo PATH] [--no-install]"
-                ));
-            }
-        }
+    if args.is_empty() {
+        return Ok(CliAction::Update);
     }
-    Ok(CliAction::Update { repo, install })
+    if matches!(args[0].as_str(), "--help" | "-h") {
+        return Err(
+            "Usage: claw update\nInstall the latest claw-code from the canonical source repository."
+                .to_string(),
+        );
+    }
+    Err(format!(
+        "unexpected argument for claw update: {}. Usage: claw update",
+        args[0]
+    ))
 }
 
 fn try_resolve_bare_skill_prompt(cwd: &Path, trimmed: &str) -> Option<String> {
@@ -1937,104 +1990,6 @@ fn save_model_provider_profile(
         fs::set_permissions(&settings_path, permissions)?;
     }
     Ok(())
-}
-
-fn run_update(repo_arg: Option<&Path>, install: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let repo = resolve_update_repo(repo_arg)?;
-    println!("Updating claw-code in {}", repo.display());
-
-    run_command("git", &["fetch", "origin"], &repo)?;
-    let remote_ref = resolve_origin_default_ref(&repo)?;
-    run_command(
-        "git",
-        &["merge", "--no-edit", "--autostash", &remote_ref],
-        &repo,
-    )?;
-
-    if install {
-        let crate_path = repo.join("rust/crates/rusty-claude-cli");
-        if !crate_path.join("Cargo.toml").exists() {
-            return Err(format!(
-                "cannot reinstall claw: {} does not contain Cargo.toml",
-                crate_path.display()
-            )
-            .into());
-        }
-        let install_root = env::var_os("CLAW_INSTALL_ROOT")
-            .map(PathBuf::from)
-            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local")))
-            .ok_or("cannot determine install root; set CLAW_INSTALL_ROOT or HOME")?;
-        let install_root_string = install_root.display().to_string();
-        run_command(
-            "cargo",
-            &[
-                "install",
-                "--path",
-                "rust/crates/rusty-claude-cli",
-                "--root",
-                &install_root_string,
-                "--force",
-            ],
-            &repo,
-        )?;
-    }
-
-    println!("claw-code update complete.");
-    Ok(())
-}
-
-fn resolve_update_repo(repo_arg: Option<&Path>) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let start = match repo_arg {
-        Some(path) => path.to_path_buf(),
-        None => env::current_dir()?,
-    };
-    let output = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(&start)
-        .output()?;
-    if !output.status.success() {
-        return Err(format!(
-            "{} is not inside a git checkout. Use `claw update --repo /path/to/claw-code`.",
-            start.display()
-        )
-        .into());
-    }
-    Ok(PathBuf::from(
-        String::from_utf8_lossy(&output.stdout).trim().to_string(),
-    ))
-}
-
-fn resolve_origin_default_ref(repo: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    let output = Command::new("git")
-        .args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
-        .current_dir(repo)
-        .output()?;
-    if output.status.success() {
-        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !value.is_empty() {
-            return Ok(value);
-        }
-    }
-    for candidate in ["origin/main", "origin/master"] {
-        let status = Command::new("git")
-            .args(["rev-parse", "--verify", "--quiet", candidate])
-            .current_dir(repo)
-            .status()?;
-        if status.success() {
-            return Ok(candidate.to_string());
-        }
-    }
-    Err("cannot resolve origin default branch; expected origin/main or origin/master".into())
-}
-
-fn run_command(program: &str, args: &[&str], cwd: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    println!("$ {program} {}", args.join(" "));
-    let status = Command::new(program).args(args).current_dir(cwd).status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{program} {} failed with status {status}", args.join(" ")).into())
-    }
 }
 
 /// Validate model syntax at parse time.
@@ -9993,10 +9948,10 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         out,
         "      Configure an OpenAI-compatible model provider profile"
     )?;
-    writeln!(out, "  claw update [--repo PATH] [--no-install]")?;
+    writeln!(out, "  claw update")?;
     writeln!(
         out,
-        "      Fetch origin, merge the upstream default branch, and reinstall claw"
+        "      Install the latest claw-code from the canonical source repository"
     )?;
     writeln!(out, "      Source of truth: {OFFICIAL_REPO_SLUG}")?;
     writeln!(
@@ -10010,6 +9965,11 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     writeln!(out, "  claw skills")?;
     writeln!(out, "  claw system-prompt [--cwd PATH] [--date YYYY-MM-DD]")?;
     writeln!(out, "  claw init")?;
+    writeln!(out, "  claw update")?;
+    writeln!(
+        out,
+        "      Install the latest claw-code from the canonical source repository"
+    )?;
     writeln!(
         out,
         "  claw export [PATH] [--session SESSION] [--output PATH]"
@@ -11100,19 +11060,6 @@ mod tests {
             parse_args(&["login".to_string()]).expect("login should parse"),
             CliAction::Login
         );
-        assert_eq!(
-            parse_args(&[
-                "update".to_string(),
-                "--repo".to_string(),
-                "/tmp/claw-code".to_string(),
-                "--no-install".to_string(),
-            ])
-            .expect("update should parse"),
-            CliAction::Update {
-                repo: Some(PathBuf::from("/tmp/claw-code")),
-                install: false,
-            }
-        );
         let logout = parse_args(&["logout".to_string()]).expect_err("logout should be removed");
         assert!(logout.contains("ANTHROPIC_AUTH_TOKEN"));
         assert_eq!(
@@ -11386,6 +11333,15 @@ mod tests {
                 manifests_dir: Some(PathBuf::from("/tmp/upstream")),
             }
         );
+    }
+
+    #[test]
+    fn update_subcommand_parses_without_repo_options() {
+        assert_eq!(
+            parse_args(&["update".to_string()]).expect("update should parse"),
+            CliAction::Update
+        );
+        assert!(parse_args(&["update".to_string(), "--repo".to_string()]).is_err());
     }
 
     #[test]
@@ -12831,7 +12787,7 @@ mod tests {
         assert!(help.contains("claw skills"));
         assert!(help.contains("claw /skills"));
         assert!(help.contains("claw login"));
-        assert!(help.contains("claw update [--repo PATH] [--no-install]"));
+        assert!(help.contains("claw update"));
         assert!(help.contains("ultraworkers/claw-code"));
         assert!(help.contains("cargo install claw-code"));
         assert!(!help.contains("claw logout"));
