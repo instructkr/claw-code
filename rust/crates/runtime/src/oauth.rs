@@ -207,7 +207,6 @@ impl OAuthTokenExchangeRequest {
             ("redirect_uri", self.redirect_uri.clone()),
             ("client_id", self.client_id.clone()),
             ("code_verifier", self.code_verifier.clone()),
-            ("state", self.state.clone()),
         ])
     }
 }
@@ -260,6 +259,11 @@ pub fn code_challenge_s256(verifier: &str) -> String {
 #[must_use]
 pub fn loopback_redirect_uri(port: u16) -> String {
     format!("http://localhost:{port}/callback")
+}
+
+#[must_use]
+pub fn loopback_redirect_uri_with_path(port: u16, path: &str) -> String {
+    format!("http://localhost:{port}{path}")
 }
 
 pub fn credentials_path() -> io::Result<PathBuf> {
@@ -396,12 +400,13 @@ pub struct OAuthCallbackResult {
     pub state: String,
 }
 
-/// Run a blocking local HTTP server that waits for a single `/callback` request.
+/// Run a blocking local HTTP server that waits for a single callback request.
 /// Returns the authorization code and state on success.
 /// Times out after `timeout` duration.
 pub fn run_oauth_callback_server(
     port: u16,
     timeout: std::time::Duration,
+    callback_path: &str,
 ) -> io::Result<OAuthCallbackResult> {
     use std::io::{BufRead, BufReader, Write};
     use std::net::{SocketAddr, TcpListener};
@@ -457,7 +462,7 @@ pub fn run_oauth_callback_server(
         }
     }
 
-    match parse_oauth_callback_request_target(target) {
+    match parse_oauth_callback_request_target(target, callback_path) {
         Ok(params) => {
             if let (Some(code), Some(state)) = (&params.code, &params.state) {
                 // Success page
@@ -643,12 +648,15 @@ pub async fn poll_device_token(
     }
 }
 
-pub fn parse_oauth_callback_request_target(target: &str) -> Result<OAuthCallbackParams, String> {
+pub fn parse_oauth_callback_request_target(
+    target: &str,
+    expected_path: &str,
+) -> Result<OAuthCallbackParams, String> {
     let (path, query) = target
         .split_once('?')
         .map_or((target, ""), |(path, query)| (path, query));
-    if path != "/callback" {
-        return Err(format!("unexpected callback path: {path}"));
+    if path != expected_path {
+        return Err(format!("unexpected callback path: {path}, expected: {expected_path}"));
     }
     parse_oauth_callback_query(query)
 }
@@ -941,11 +949,11 @@ mod tests {
         assert_eq!(params.state.as_deref(), Some("state-1"));
         assert_eq!(params.error_description.as_deref(), Some("needs login"));
 
-        let params = parse_oauth_callback_request_target("/callback?code=abc&state=xyz")
+        let params = parse_oauth_callback_request_target("/callback?code=abc&state=xyz", "/callback")
             .expect("parse callback target");
         assert_eq!(params.code.as_deref(), Some("abc"));
         assert_eq!(params.state.as_deref(), Some("xyz"));
-        assert!(parse_oauth_callback_request_target("/wrong?code=abc").is_err());
+        assert!(parse_oauth_callback_request_target("/wrong?code=abc", "/callback").is_err());
     }
 
     #[test]
@@ -1050,7 +1058,7 @@ mod tests {
 
         let port = 4547;
         let server_thread = thread::spawn(move || {
-            run_oauth_callback_server(port, std::time::Duration::from_secs(5))
+            run_oauth_callback_server(port, std::time::Duration::from_secs(5), "/callback")
         });
 
         // Give the server a moment to bind
@@ -1084,7 +1092,7 @@ mod tests {
 
         let port = 4548;
         let server_thread = thread::spawn(move || {
-            run_oauth_callback_server(port, std::time::Duration::from_secs(5))
+            run_oauth_callback_server(port, std::time::Duration::from_secs(5), "/callback")
         });
 
         thread::sleep(std::time::Duration::from_millis(100));
@@ -1107,7 +1115,7 @@ mod tests {
     #[test]
     fn callback_server_times_out_when_no_request() {
         let port = 4549;
-        let result = run_oauth_callback_server(port, std::time::Duration::from_millis(50));
+        let result = run_oauth_callback_server(port, std::time::Duration::from_millis(50), "/callback");
         assert!(result.is_err(), "expected timeout error");
     }
 

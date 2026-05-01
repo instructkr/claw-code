@@ -1674,6 +1674,7 @@ const LOGIN_PROVIDER_TEMPLATES: &[LoginProviderTemplate] = &[
         oauth: Some(ProviderOAuthConfig {
             client_id: "17e5f671-d194-4dfb-9706-5516cb48c098",
             callback_port: 4546,
+            redirect_path: "/callback",
             flow: OAuthFlowType::Device {
                 device_auth_url: "https://auth.kimi.com/api/oauth/device_authorization",
                 token_url: "https://auth.kimi.com/api/oauth/token",
@@ -8264,6 +8265,7 @@ enum OAuthFlowType {
 struct ProviderOAuthConfig {
     client_id: &'static str,
     callback_port: u16,
+    redirect_path: &'static str,
     flow: OAuthFlowType,
 }
 
@@ -8292,6 +8294,7 @@ const BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
         oauth: Some(ProviderOAuthConfig {
             client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
             callback_port: 1455,
+            redirect_path: "/auth/callback",
             flow: OAuthFlowType::Pkce {
                 authorize_url: "https://auth.openai.com/oauth/authorize",
                 token_url: "https://auth.openai.com/oauth/token",
@@ -8597,7 +8600,7 @@ fn run_pkce_oauth_flow(
     oauth: &ProviderOAuthConfig,
 ) -> Result<runtime::OAuthTokenSet, Box<dyn std::error::Error>> {
     use runtime::{
-        generate_pkce_pair, generate_state, loopback_redirect_uri, open_browser,
+        generate_pkce_pair, generate_state, loopback_redirect_uri_with_path, open_browser,
         run_oauth_callback_server, OAuthAuthorizationRequest, OAuthTokenExchangeRequest,
     };
 
@@ -8622,8 +8625,18 @@ fn run_pkce_oauth_flow(
         scopes: scopes.iter().map(|s| (*s).to_string()).collect(),
     };
 
-    let auth_request =
-        OAuthAuthorizationRequest::from_config(&config, loopback_redirect_uri(oauth.callback_port), &state, &pkce);
+    let redirect_uri = loopback_redirect_uri_with_path(oauth.callback_port, oauth.redirect_path);
+
+    let mut auth_request =
+        OAuthAuthorizationRequest::from_config(&config, &redirect_uri, &state, &pkce);
+
+    // OpenAI-specific parameters required for drop-in Codex CLI compatibility
+    if provider_id == "openai" {
+        auth_request = auth_request
+            .with_extra_param("id_token_add_organizations", "true")
+            .with_extra_param("codex_cli_simplified_flow", "true");
+    }
+
     let auth_url = auth_request.build_url();
 
     println!("Opening browser for OAuth authentication...");
@@ -8632,7 +8645,11 @@ fn run_pkce_oauth_flow(
     open_browser(&auth_url)?;
 
     println!("Waiting for authentication...");
-    let callback = run_oauth_callback_server(oauth.callback_port, std::time::Duration::from_secs(300))?;
+    let callback = run_oauth_callback_server(
+        oauth.callback_port,
+        std::time::Duration::from_secs(300),
+        oauth.redirect_path,
+    )?;
 
     if callback.state != state {
         return Err("OAuth state mismatch. Possible CSRF attack.".into());
@@ -8648,7 +8665,7 @@ fn run_pkce_oauth_flow(
             &callback.code,
             &state,
             &pkce.verifier,
-            &loopback_redirect_uri(oauth.callback_port),
+            &redirect_uri,
         );
 
         let response = client
