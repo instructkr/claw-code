@@ -68,9 +68,20 @@ impl ProviderClient {
                             )));
                         }
                     }
-                    Ok(Self::OpenAi(OpenAiCompatClient::from_env_or_oauth(
-                        config, provider_id,
-                    )?))
+                    if provider_id == "moonshot" {
+                        Ok(Self::OpenAi(
+                            OpenAiCompatClient::from_env_or_oauth_with_refresh(
+                                config,
+                                provider_id,
+                                "https://auth.kimi.com/api/oauth/token",
+                                "17e5f671-d194-4dfb-9706-5516cb48c098",
+                            )?,
+                        ))
+                    } else {
+                        Ok(Self::OpenAi(OpenAiCompatClient::from_env_or_oauth(
+                            config, provider_id,
+                        )?))
+                    }
                 } else {
                     Ok(Self::OpenAi(OpenAiCompatClient::from_env(config)?))
                 }
@@ -85,6 +96,27 @@ impl ProviderClient {
     ) -> Self {
         Self::OpenAi(
             OpenAiCompatClient::new(api_key, OpenAiCompatConfig::openai()).with_base_url(base_url),
+        )
+    }
+
+    /// Create an OpenAI-compatible client from an OAuth token set with automatic refresh.
+    /// Used for custom providers that authenticate via OAuth rather than API keys.
+    #[must_use]
+    pub fn from_openai_compatible_oauth(
+        base_url: impl Into<String>,
+        token_set: runtime::OAuthTokenSet,
+        token_url: impl Into<String>,
+        client_id: impl Into<String>,
+    ) -> Self {
+        Self::OpenAi(
+            OpenAiCompatClient::from_oauth_token_set(
+                token_set,
+                OpenAiCompatConfig::openai(),
+                token_url,
+                client_id,
+                "custom",
+            )
+            .with_base_url(base_url),
         )
     }
 

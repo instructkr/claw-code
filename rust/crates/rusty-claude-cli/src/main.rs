@@ -103,6 +103,13 @@ struct ConfiguredModelProvider {
     provider_type: String,
     api_key: String,
     base_url: String,
+    /// Full OAuth token set when auth came from saved OAuth credentials.
+    /// Enables automatic token refresh for custom providers.
+    oauth_token_set: Option<runtime::OAuthTokenSet>,
+    /// OAuth token URL for refreshing the access token.
+    oauth_token_url: Option<String>,
+    /// OAuth client ID for refreshing the access token.
+    oauth_client_id: Option<String>,
 }
 
 impl ModelProvenance {
@@ -488,6 +495,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             allow_broad_cwd,
         )?,
         CliAction::Auth { provider } => run_auth_command(provider.as_deref())?,
+        CliAction::Model { name } => run_model_command(name.as_deref())?,
         CliAction::HelpTopic(topic) => print_help_topic(topic),
         CliAction::Help { output_format } => print_help(output_format)?,
     }
@@ -594,6 +602,9 @@ enum CliAction {
     },
     Auth {
         provider: Option<String>,
+    },
+    Model {
+        name: Option<String>,
     },
     HelpTopic(LocalHelpTopic),
     // prompt-mode formatting is only supported for non-interactive runs
@@ -992,6 +1003,20 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             }
             Ok(CliAction::Auth { provider })
         }
+        "model" | "models" => {
+            if rest.len() == 2 && is_help_flag(&rest[1]) {
+                return Ok(CliAction::Help { output_format });
+            }
+            let name = rest.get(1).cloned();
+            if rest.len() > 2 {
+                return Err(format!(
+                    "unexpected extra arguments after `claw model {}`: {}",
+                    name.as_deref().unwrap_or(""),
+                    rest[2..].join(" ")
+                ));
+            }
+            Ok(CliAction::Model { name })
+        }
         "init" => Ok(CliAction::Init { output_format }),
         "export" => parse_export_args(&rest[1..], output_format),
         "prompt" => {
@@ -1151,11 +1176,11 @@ fn parse_single_word_command_alias(
         "sandbox" => Some(Ok(CliAction::Sandbox { output_format })),
         "doctor" => Some(Ok(CliAction::Doctor { output_format })),
         "state" => Some(Ok(CliAction::State { output_format })),
-        // #146: let `config` and `diff` fall through to parse_subcommand
+        // #146: let `config`, `diff`, and `model` fall through to parse_subcommand
         // where they are wired as pure-local introspection, instead of
         // producing the "is a slash command" guidance. Zero-arg cases
         // reach parse_subcommand too via this None.
-        "config" | "diff" => None,
+        "config" | "diff" | "model" | "models" => None,
         other => bare_slash_command_guidance(other).map(Err),
     }
 }
@@ -1552,37 +1577,81 @@ fn configured_provider_for_model(
         )
         .into());
     }
-    let (api_key, base_url) = if let Some(api_key) = provider.api_key().filter(|value| !value.is_empty()) {
-        (api_key.to_string(), provider.base_url().to_string())
-    } else if let Some(env_name) = provider.api_key_env() {
-        if let Ok(key) = env::var(env_name) {
-            (key, provider.base_url().to_string())
-        } else if let Ok(Some(token_set)) = runtime::load_provider_oauth(provider_name) {
-            // Fall back to saved OAuth bearer token when env var is unset.
-            // For OpenAI, OAuth tokens are WHAM-backend tokens, not Platform API tokens.
-            // Override the base URL to the WHAM backend.
-            let base_url = if provider_name == "openai" {
-                api::DEFAULT_WHAM_BASE_URL.to_string()
-            } else {
-                provider.base_url().to_string()
-            };
-            (token_set.access_token, base_url)
-        } else {
-            return Err(format!(
-                "model provider '{provider_name}' requires env var {env_name}"
+    let (api_key, base_url, oauth_token_set, oauth_token_url, oauth_client_id) =
+        if let Some(api_key) = provider.api_key().filter(|value| !value.is_empty()) {
+            (
+                api_key.to_string(),
+                provider.base_url().to_string(),
+                None,
+                None,
+                None,
             )
-            .into());
-        }
-    } else {
-        return Err(
-            format!("model provider '{provider_name}' requires apiKeyEnv or apiKey").into(),
-        );
-    };
+        } else if let Some(env_name) = provider.api_key_env() {
+            if let Ok(key) = env::var(env_name) {
+                (
+                    key,
+                    provider.base_url().to_string(),
+                    None,
+                    None,
+                    None,
+                )
+            } else if let Ok(Some(token_set)) = runtime::load_provider_oauth(provider_name) {
+                // Fall back to saved OAuth bearer token when env var is unset.
+                // For OpenAI, OAuth tokens are WHAM-backend tokens, not Platform API tokens.
+                // Override the base URL to the WHAM backend.
+                let base_url = if provider_name == "openai" {
+                    api::DEFAULT_WHAM_BASE_URL.to_string()
+                } else {
+                    provider.base_url().to_string()
+                };
+                // Look up OAuth refresh config from login templates so custom
+                // providers that match built-in templates get automatic refresh.
+                let template_oauth = LOGIN_PROVIDER_TEMPLATES
+                    .iter()
+                    .find(|t| t.id == provider_name)
+                    .and_then(|t| t.oauth.as_ref())
+                    .or_else(|| {
+                        LOGIN_PROVIDER_TEMPLATES
+                            .iter()
+                            .find(|t| t.base_url == provider.base_url())
+                            .and_then(|t| t.oauth.as_ref())
+                    });
+                let (token_url, client_id) = match template_oauth {
+                    Some(oauth) => {
+                        let token_url = match oauth.flow {
+                            OAuthFlowType::Device { token_url, .. } => token_url,
+                            OAuthFlowType::Pkce { token_url, .. } => token_url,
+                        };
+                        (Some(token_url.to_string()), Some(oauth.client_id.to_string()))
+                    }
+                    None => (None, None),
+                };
+                (
+                    token_set.access_token.clone(),
+                    base_url,
+                    Some(token_set),
+                    token_url,
+                    client_id,
+                )
+            } else {
+                return Err(format!(
+                    "model provider '{provider_name}' requires env var {env_name}"
+                )
+                .into());
+            }
+        } else {
+            return Err(
+                format!("model provider '{provider_name}' requires apiKeyEnv or apiKey").into(),
+            );
+        };
     Ok(Some(ConfiguredModelProvider {
         wire_model: wire_model.to_string(),
         provider_type: provider.provider_type().to_string(),
         api_key,
         base_url,
+        oauth_token_set,
+        oauth_token_url,
+        oauth_client_id,
     }))
 }
 
@@ -8225,6 +8294,16 @@ impl AnthropicRuntimeClient {
                                 provider.base_url,
                             )
                         }
+                    } else if let (Some(token_set), Some(token_url), Some(client_id)) =
+                        (provider.oauth_token_set, provider.oauth_token_url, provider.oauth_client_id)
+                    {
+                        // Custom provider with OAuth: use auto-refreshing client.
+                        ApiProviderClient::from_openai_compatible_oauth(
+                            provider.base_url,
+                            token_set,
+                            token_url,
+                            client_id,
+                        )
                     } else {
                         ApiProviderClient::from_openai_compatible_profile(
                             provider.api_key,
@@ -8560,6 +8639,93 @@ fn run_provider_welcome(
 
     // No custom providers in welcome — only built-in and templates.
     Err("Invalid selection".into())
+}
+
+fn run_model_command(name: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = env::current_dir()?;
+    let loader = ConfigLoader::default_for(&cwd);
+    let config = loader.load()?;
+
+    if let Some(name) = name {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("model name cannot be empty".into());
+        }
+        validate_model_syntax(trimmed)?;
+        let resolved = resolve_model_alias_with_config(trimmed);
+
+        // Write to user settings.json
+        let settings_path = loader.config_home().join("settings.json");
+        let mut settings: serde_json::Value = if settings_path.exists() {
+            let contents = fs::read_to_string(&settings_path)?;
+            serde_json::from_str(&contents).unwrap_or_else(|_| serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
+        if let Some(obj) = settings.as_object_mut() {
+            obj.insert("model".to_string(), serde_json::Value::String(resolved.clone()));
+        }
+        fs::create_dir_all(loader.config_home())?;
+        fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
+
+        println!("Default model set to: {}", resolved);
+        return Ok(());
+    }
+
+    // No name provided: show current model and list available models
+    let env_model = env::var("ANTHROPIC_MODEL").ok();
+    let current_model = config.model()
+        .or_else(|| env_model.as_deref())
+        .unwrap_or(DEFAULT_MODEL);
+
+    println!("Current model: {}", current_model);
+    println!();
+    println!("Available models:");
+
+    // Built-in providers
+    println!("  Built-in:");
+    for builtin in BUILTIN_PROVIDERS {
+        let label = match builtin.id {
+            "anthropic" => "Anthropic (Claude)",
+            "openai" => "OpenAI",
+            "xai" => "xAI (Grok)",
+            other => other,
+        };
+        println!("    {}:", label);
+        println!("      {}/{}", builtin.id, builtin.default_model);
+    }
+
+    // Login templates
+    println!("  Additional providers:");
+    for template in LOGIN_PROVIDER_TEMPLATES {
+        println!("    {}:", template.label);
+        for model in template.models {
+            println!("      {}/{}", template.id, model);
+        }
+    }
+
+    // Custom providers from config
+    let custom_providers = config.model_providers();
+    if !custom_providers.is_empty() {
+        println!("  Custom providers:");
+        for (name, provider) in custom_providers {
+            println!("    {}:", name);
+            if !provider.models().is_empty() {
+                for model in provider.models() {
+                    println!("      {}/{}", name, model);
+                }
+            } else if let Some(default) = provider.default_model() {
+                println!("      {}/{}", name, default);
+            }
+        }
+    }
+
+    println!();
+    println!("Usage:");
+    println!("  claw model <provider/model>    Set default model");
+    println!("  claw --model <model> prompt    Use model for one prompt");
+
+    Ok(())
 }
 
 fn run_auth_command(provider: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
@@ -10365,6 +10531,11 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         out,
         "      Authenticate with a model provider (anthropic, openai, xai)"
     )?;
+    writeln!(out, "  claw model [MODEL]")?;
+    writeln!(
+        out,
+        "      Show available models or set the default model"
+    )?;
     writeln!(
         out,
         "  claw export [PATH] [--session SESSION] [--output PATH]"
@@ -10804,7 +10975,7 @@ mod tests {
     #[test]
     fn defaults_to_repl_when_no_args() {
         let _guard = env_lock();
-        std::env::remove_var("RUSTY_CLAUDE_PERMISSION_MODE");
+        std::env::set_var("RUSTY_CLAUDE_PERMISSION_MODE", "danger-full-access");
         assert_eq!(
             parse_args(&[]).expect("args should parse"),
             CliAction::Repl {
@@ -10931,7 +11102,7 @@ mod tests {
     #[test]
     fn parses_prompt_subcommand() {
         let _guard = env_lock();
-        std::env::remove_var("RUSTY_CLAUDE_PERMISSION_MODE");
+        std::env::set_var("RUSTY_CLAUDE_PERMISSION_MODE", "danger-full-access");
         let args = vec![
             "prompt".to_string(),
             "hello".to_string(),
@@ -10971,6 +11142,32 @@ mod tests {
             parse_args(&["auth".to_string(), "openai".to_string()]).expect("args should parse"),
             CliAction::Auth {
                 provider: Some("openai".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_args_model_without_name() {
+        let _guard = env_lock();
+        std::env::remove_var("RUSTY_CLAUDE_PERMISSION_MODE");
+        assert_eq!(
+            parse_args(&["model".to_string()]).expect("args should parse"),
+            CliAction::Model { name: None }
+        );
+        assert_eq!(
+            parse_args(&["models".to_string()]).expect("args should parse"),
+            CliAction::Model { name: None }
+        );
+    }
+
+    #[test]
+    fn parse_args_model_with_name() {
+        let _guard = env_lock();
+        std::env::remove_var("RUSTY_CLAUDE_PERMISSION_MODE");
+        assert_eq!(
+            parse_args(&["model".to_string(), "moonshot/kimi-k2.6".to_string()]).expect("args should parse"),
+            CliAction::Model {
+                name: Some("moonshot/kimi-k2.6".to_string()),
             }
         );
     }
@@ -11042,7 +11239,7 @@ mod tests {
     #[test]
     fn parses_bare_prompt_and_json_output_flag() {
         let _guard = env_lock();
-        std::env::remove_var("RUSTY_CLAUDE_PERMISSION_MODE");
+        std::env::set_var("RUSTY_CLAUDE_PERMISSION_MODE", "danger-full-access");
         let args = vec![
             "--output-format=json".to_string(),
             "--model".to_string(),
@@ -11070,7 +11267,7 @@ mod tests {
     fn parses_compact_flag_for_prompt_mode() {
         // given a bare prompt invocation that includes the --compact flag
         let _guard = env_lock();
-        std::env::remove_var("RUSTY_CLAUDE_PERMISSION_MODE");
+        std::env::set_var("RUSTY_CLAUDE_PERMISSION_MODE", "danger-full-access");
         let args = vec![
             "--compact".to_string(),
             "summarize".to_string(),
@@ -11117,7 +11314,7 @@ mod tests {
     #[test]
     fn resolves_model_aliases_in_args() {
         let _guard = env_lock();
-        std::env::remove_var("RUSTY_CLAUDE_PERMISSION_MODE");
+        std::env::set_var("RUSTY_CLAUDE_PERMISSION_MODE", "danger-full-access");
         let args = vec![
             "--model".to_string(),
             "opus".to_string(),
@@ -11347,7 +11544,7 @@ mod tests {
     #[test]
     fn parses_allowed_tools_flags_with_aliases_and_lists() {
         let _guard = env_lock();
-        std::env::remove_var("RUSTY_CLAUDE_PERMISSION_MODE");
+        std::env::set_var("RUSTY_CLAUDE_PERMISSION_MODE", "danger-full-access");
         let args = vec![
             "--allowedTools".to_string(),
             "read,glob".to_string(),
@@ -11991,7 +12188,7 @@ mod tests {
     #[test]
     fn parses_single_word_command_aliases_without_falling_back_to_prompt_mode() {
         let _guard = env_lock();
-        std::env::remove_var("RUSTY_CLAUDE_PERMISSION_MODE");
+        std::env::set_var("RUSTY_CLAUDE_PERMISSION_MODE", "danger-full-access");
         assert_eq!(
             parse_args(&["help".to_string()]).expect("help should parse"),
             CliAction::Help {
@@ -12657,6 +12854,8 @@ mod tests {
 
     #[test]
     fn prompt_subcommand_allows_literal_typo_word() {
+        let _guard = env_lock();
+        std::env::set_var("RUSTY_CLAUDE_PERMISSION_MODE", "danger-full-access");
         assert_eq!(
             parse_args(&["prompt".to_string(), "doctorr".to_string()])
                 .expect("explicit prompt subcommand should allow literal typo word"),
@@ -12680,6 +12879,7 @@ mod tests {
         // doesn't pick up a stale .claw/settings.json from other tests that
         // may have set `permissionMode: acceptEdits` in a shared cwd.
         let _guard = env_lock();
+        std::env::set_var("RUSTY_CLAUDE_PERMISSION_MODE", "danger-full-access");
         let root = temp_dir();
         let cwd = root.join("project");
         std::fs::create_dir_all(&cwd).expect("project dir should exist");
