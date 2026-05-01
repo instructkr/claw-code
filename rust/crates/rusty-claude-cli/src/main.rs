@@ -24,10 +24,11 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use api::{
-    detect_provider_kind, resolve_startup_auth_source, AnthropicClient, AuthSource,
-    ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest, MessageResponse,
-    OutputContentBlock, PromptCache, ProviderClient as ApiProviderClient, ProviderKind,
-    StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock,
+    anthropic_has_auth, detect_provider_kind, has_api_key, resolve_startup_auth_source,
+    AnthropicClient, AuthSource, ContentBlockDelta, InputContentBlock, InputMessage,
+    MessageRequest, MessageResponse, OutputContentBlock, PromptCache,
+    ProviderClient as ApiProviderClient, ProviderKind, StreamEvent as ApiStreamEvent, ToolChoice,
+    ToolDefinition, ToolResultContentBlock,
 };
 
 use commands::{
@@ -407,7 +408,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 None
             };
             let effective_prompt = merge_prompt_with_stdin(&prompt, stdin_context.as_deref());
-            let mut cli = LiveCli::new(model, true, allowed_tools, permission_mode)?;
+            let resolved_model = resolve_model_alias_with_config(&model);
+            let final_model = if !check_model_auth_available(&resolved_model)? {
+                match run_provider_welcome(&resolved_model)? {
+                    Some(new_model) => new_model,
+                    None => return Ok(()),
+                }
+            } else {
+                resolved_model
+            };
+            let mut cli = LiveCli::new(final_model, true, allowed_tools, permission_mode)?;
             cli.set_reasoning_effort(reasoning_effort);
             cli.run_turn_with_output(&effective_prompt, output_format, compact)?;
         }
@@ -464,6 +474,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             reasoning_effort,
             allow_broad_cwd,
         )?,
+        CliAction::Auth { provider } => run_auth_command(provider.as_deref())?,
         CliAction::HelpTopic(topic) => print_help_topic(topic),
         CliAction::Help { output_format } => print_help(output_format)?,
     }
@@ -566,6 +577,9 @@ enum CliAction {
         base_commit: Option<String>,
         reasoning_effort: Option<String>,
         allow_broad_cwd: bool,
+    },
+    Auth {
+        provider: Option<String>,
     },
     HelpTopic(LocalHelpTopic),
     // prompt-mode formatting is only supported for non-interactive runs
@@ -949,6 +963,20 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         "system-prompt" => parse_system_prompt_args(&rest[1..], output_format),
         "acp" => parse_acp_args(&rest[1..], output_format),
         "login" | "logout" => Err(removed_auth_surface_error(rest[0].as_str())),
+        "auth" => {
+            if rest.len() == 2 && is_help_flag(&rest[1]) {
+                return Ok(CliAction::Help { output_format });
+            }
+            let provider = rest.get(1).cloned();
+            if rest.len() > 2 {
+                return Err(format!(
+                    "unexpected extra arguments after `claw auth {}`: {}",
+                    provider.as_deref().unwrap_or(""),
+                    rest[2..].join(" ")
+                ));
+            }
+            Ok(CliAction::Auth { provider })
+        }
         "init" => Ok(CliAction::Init { output_format }),
         "export" => parse_export_args(&rest[1..], output_format),
         "prompt" => {
@@ -1339,6 +1367,7 @@ fn suggest_similar_subcommand(input: &str) -> Option<Vec<String>> {
         "init",
         "export",
         "prompt",
+        "auth",
     ];
 
     let normalized_input = input.to_ascii_lowercase();
@@ -3772,6 +3801,21 @@ fn run_repl(
     enforce_broad_cwd_policy(allow_broad_cwd, CliOutputFormat::Text)?;
     run_stale_base_preflight(base_commit.as_deref());
     let resolved_model = resolve_repl_model(model);
+    if !check_model_auth_available(&resolved_model)? {
+        match run_provider_welcome(&resolved_model)? {
+            Some(new_model) => {
+                return run_repl(
+                    new_model,
+                    allowed_tools,
+                    permission_mode,
+                    base_commit,
+                    reasoning_effort,
+                    allow_broad_cwd,
+                );
+            }
+            None => return Ok(()),
+        }
+    }
     let mut cli = LiveCli::new(resolved_model, true, allowed_tools, permission_mode)?;
     cli.set_reasoning_effort(reasoning_effort);
     let mut editor =
@@ -7737,6 +7781,154 @@ fn resolve_cli_auth_source_for_cwd() -> Result<AuthSource, api::ApiError> {
     resolve_startup_auth_source(|| Ok(None))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BuiltinProvider {
+    id: &'static str,
+    label: &'static str,
+    env_var: &'static str,
+    default_model: &'static str,
+}
+
+const BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
+    BuiltinProvider {
+        id: "anthropic",
+        label: "Anthropic (Claude)",
+        env_var: "ANTHROPIC_API_KEY",
+        default_model: "claude-opus-4-6",
+    },
+    BuiltinProvider {
+        id: "openai",
+        label: "OpenAI",
+        env_var: "OPENAI_API_KEY",
+        default_model: "gpt-4o",
+    },
+    BuiltinProvider {
+        id: "xai",
+        label: "xAI (Grok)",
+        env_var: "XAI_API_KEY",
+        default_model: "grok-3",
+    },
+];
+
+fn check_model_auth_available(model: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    let resolved = api::resolve_model_alias(model);
+    let provider = detect_provider_kind(&resolved);
+    let available = match provider {
+        ProviderKind::Anthropic => anthropic_has_auth().unwrap_or(false),
+        ProviderKind::Xai => has_api_key("XAI_API_KEY"),
+        ProviderKind::OpenAi => has_api_key("OPENAI_API_KEY") || has_api_key("DASHSCOPE_API_KEY"),
+    };
+    Ok(available)
+}
+
+fn run_provider_welcome(
+    default_model: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Err(
+            "Authentication required. Set one of these environment variables:\n\
+             \n\
+             ANTHROPIC_API_KEY=<key>     # For Anthropic (Claude)\n\
+             OPENAI_API_KEY=<key>        # For OpenAI\n\
+             XAI_API_KEY=<key>           # For xAI (Grok)\n\
+             DASHSCOPE_API_KEY=<key>     # For DashScope/Qwen"
+                .into(),
+        );
+    }
+
+    println!(
+        "\n\x1b[1mWelcome to Claw Code\x1b[0m\n\n\
+         No API key detected for the selected model.\n\
+         Choose a provider to authenticate with:\n"
+    );
+
+    for (i, provider) in BUILTIN_PROVIDERS.iter().enumerate() {
+        println!("  {}. {} ({})", i + 1, provider.label, provider.env_var);
+    }
+
+    print!("\nEnter number (1-{}): ", BUILTIN_PROVIDERS.len());
+    std::io::stdout().flush()?;
+    let mut choice = String::new();
+    std::io::stdin().read_line(&mut choice)?;
+    let choice = choice.trim();
+
+    let index: usize = choice.parse().map_err(|_| "invalid selection")?;
+    let provider = BUILTIN_PROVIDERS
+        .get(index.wrapping_sub(1))
+        .ok_or("invalid selection")?;
+
+    print!("Enter {} (or press Enter to cancel): ", provider.env_var);
+    std::io::stdout().flush()?;
+    let mut key = String::new();
+    std::io::stdin().read_line(&mut key)?;
+    let key = key.trim();
+
+    if key.is_empty() {
+        println!("Cancelled.");
+        return Ok(None);
+    }
+
+    std::env::set_var(provider.env_var, key);
+
+    // Optionally save to ~/.claw/settings.json as a simple model config.
+    if let Some(home) = std::env::var_os("HOME") {
+        let claw_dir = std::path::PathBuf::from(home).join(".claw");
+        if claw_dir.exists() || std::fs::create_dir_all(&claw_dir).is_ok() {
+            let settings_path = claw_dir.join("settings.json");
+            let model_str = format!("{}/{}", provider.id, provider.default_model);
+            let content = format!("{{\"model\": \"{model_str}\"}}");
+            let _ = std::fs::write(&settings_path, content);
+        }
+    }
+
+    Ok(Some(format!("{}/{}", provider.id, provider.default_model)))
+}
+
+fn run_auth_command(provider: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(provider_id) = provider {
+        let builtin = BUILTIN_PROVIDERS
+            .iter()
+            .find(|p| p.id == provider_id)
+            .ok_or_else(|| format!("unknown provider: {provider_id}"))?;
+
+        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+            return Err(format!(
+                "Authentication requires a terminal. Set the environment variable instead:\n\
+                 \n\
+                 export {}=<key>",
+                builtin.env_var
+            )
+            .into());
+        }
+
+        print!("Enter {} (or press Enter to cancel): ", builtin.env_var);
+        std::io::stdout().flush()?;
+        let mut key = String::new();
+        std::io::stdin().read_line(&mut key)?;
+        let key = key.trim();
+
+        if key.is_empty() {
+            println!("Cancelled.");
+            return Ok(());
+        }
+
+        std::env::set_var(builtin.env_var, key);
+        println!("Authentication set for {}.", builtin.label);
+        Ok(())
+    } else {
+        match run_provider_welcome(DEFAULT_MODEL)? {
+            Some(model) => {
+                println!("Authentication configured. Model set to {model}.");
+                Ok(())
+            }
+            None => {
+                println!("Cancelled.");
+                Ok(())
+            }
+        }
+    }
+}
+
 impl ApiClient for AnthropicRuntimeClient {
     #[allow(clippy::too_many_lines)]
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
@@ -9121,6 +9313,11 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     writeln!(out, "  claw skills")?;
     writeln!(out, "  claw system-prompt [--cwd PATH] [--date YYYY-MM-DD]")?;
     writeln!(out, "  claw init")?;
+    writeln!(out, "  claw auth [PROVIDER]")?;
+    writeln!(
+        out,
+        "      Authenticate with a model provider (anthropic, openai, xai)"
+    )?;
     writeln!(
         out,
         "  claw export [PATH] [--session SESSION] [--output PATH]"
@@ -9703,6 +9900,28 @@ mod tests {
                 base_commit: None,
                 reasoning_effort: None,
                 allow_broad_cwd: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_args_auth_without_provider() {
+        let _guard = env_lock();
+        std::env::remove_var("RUSTY_CLAUDE_PERMISSION_MODE");
+        assert_eq!(
+            parse_args(&["auth".to_string()]).expect("args should parse"),
+            CliAction::Auth { provider: None }
+        );
+    }
+
+    #[test]
+    fn parse_args_auth_with_provider() {
+        let _guard = env_lock();
+        std::env::remove_var("RUSTY_CLAUDE_PERMISSION_MODE");
+        assert_eq!(
+            parse_args(&["auth".to_string(), "openai".to_string()]).expect("args should parse"),
+            CliAction::Auth {
+                provider: Some("openai".to_string()),
             }
         );
     }
@@ -13617,5 +13836,31 @@ mod dump_manifests_tests {
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+
+#[cfg(test)]
+mod auth_tests {
+    use super::{parse_args, CliAction};
+
+    #[test]
+    fn parse_args_auth_without_provider() {
+        let args = vec!["auth".to_string()];
+        let action = parse_args(&args).expect("should parse");
+        match action {
+            CliAction::Auth { provider } => assert!(provider.is_none()),
+            other => panic!("expected CliAction::Auth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_args_auth_with_provider() {
+        let args = vec!["auth".to_string(), "openai".to_string()];
+        let action = parse_args(&args).expect("should parse");
+        match action {
+            CliAction::Auth { provider } => assert_eq!(provider, Some("openai".to_string())),
+            other => panic!("expected CliAction::Auth, got {other:?}"),
+        }
     }
 }
