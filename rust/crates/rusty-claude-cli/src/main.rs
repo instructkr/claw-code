@@ -8323,10 +8323,43 @@ const BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
 fn check_model_auth_available(model: &str) -> Result<bool, Box<dyn std::error::Error>> {
     let resolved = api::resolve_model_alias(model);
 
-    // Use metadata_for_model for prefix-aware auth checking so each provider
-    // gets its correct env var and OAuth store key.
+    // If model has a provider/ prefix, check auth for that specific provider.
+    // This works for ANY provider (built-in, template, or custom from .claw.json).
+    if let Some((provider_name, _)) = resolved.split_once('/') {
+        // Generic OAuth check: any provider may have a saved OAuth token
+        if runtime::load_provider_oauth(provider_name).ok().flatten().is_some() {
+            return Ok(true);
+        }
+        // Check the provider's config from .claw.json for env var or hardcoded key
+        if let Ok(cwd) = env::current_dir() {
+            if let Ok(config) = ConfigLoader::default_for(&cwd).load() {
+                if let Some(provider) = config.model_providers().get(provider_name) {
+                    if provider.api_key().filter(|k| !k.is_empty()).is_some() {
+                        return Ok(true);
+                    }
+                    if let Some(env_name) = provider.api_key_env() {
+                        if has_api_key(env_name) {
+                            return Ok(true);
+                        }
+                    }
+                    // Configured but no auth available
+                    return Ok(false);
+                }
+            }
+        }
+        // Not configured in .claw.json - check built-in provider env vars
+        return Ok(match provider_name {
+            "openai" => has_api_key("OPENAI_API_KEY"),
+            "xai" => has_api_key("XAI_API_KEY"),
+            "anthropic" => anthropic_has_auth().unwrap_or(false),
+            _ => false,
+        });
+    }
+
+    // No prefix - use metadata_for_model for built-in model detection
     if let Some(meta) = api::metadata_for_model(&resolved) {
         let has_env = has_api_key(meta.auth_env);
+        // Generic OAuth check based on auth_env mapping
         let has_oauth = match meta.auth_env {
             "OPENAI_API_KEY" => {
                 runtime::load_provider_oauth("openai").ok().flatten().is_some()
@@ -8339,8 +8372,7 @@ fn check_model_auth_available(model: &str) -> Result<bool, Box<dyn std::error::E
         return Ok(has_env || has_oauth);
     }
 
-    // For bare model names without recognized prefix, fall back to
-    // provider-kind detection (env-var sniffing + last-resort defaults).
+    // Bare model name without recognized prefix - fall back to env sniffing
     let provider = detect_provider_kind(&resolved);
     let available = match provider {
         ProviderKind::Anthropic => anthropic_has_auth().unwrap_or(false),
@@ -8397,6 +8429,43 @@ fn run_provider_welcome(
             oauth_tag
         );
     }
+
+    // Load custom providers from .claw.json that need authentication
+    let custom_providers: Vec<(String, String)> = if let Ok(cwd) = env::current_dir() {
+        if let Ok(config) = ConfigLoader::default_for(&cwd).load() {
+            config
+                .model_providers()
+                .iter()
+                .filter(|(name, _)| {
+                    // Exclude providers already shown as built-in or templates
+                    !BUILTIN_PROVIDERS.iter().any(|p| p.id == name.as_str())
+                        && !LOGIN_PROVIDER_TEMPLATES.iter().any(|t| t.id == name.as_str())
+                })
+                .filter(|(_, provider)| {
+                    // Only show providers that actually need auth (have apiKeyEnv)
+                    provider.api_key_env().is_some()
+                })
+                .map(|(name, provider)| (name.clone(), provider.provider_type().to_string()))
+                .collect()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    let custom_count = custom_providers.len();
+
+    if !custom_providers.is_empty() {
+        println!("\n  Custom providers:");
+        for (i, (name, provider_type)) in custom_providers.iter().enumerate() {
+            println!(
+                "  {}. {name} ({provider_type})",
+                builtin_count + template_count + i + 1
+            );
+        }
+    }
+
+    let total = builtin_count + template_count + custom_count;
 
     print!("\nEnter number (1-{total}): ");
     std::io::stdout().flush()?;
@@ -8493,7 +8562,50 @@ fn run_provider_welcome(
         template.default_model,
     )?;
 
-    Ok(Some(format!("{}/{}", template.id, template.default_model)))
+    // Custom provider from .claw.json selected
+    let custom_index = index - builtin_count - template_count - 1;
+    let custom_name = custom_providers
+        .get(custom_index)
+        .map(|(name, _)| name.as_str())
+        .expect("valid custom provider index");
+
+    if let Ok(cwd) = env::current_dir() {
+        if let Ok(config) = ConfigLoader::default_for(&cwd).load() {
+            if let Some(provider) = config.model_providers().get(custom_name) {
+                if let Some(env_name) = provider.api_key_env() {
+                    print!("Enter {} (or press Enter to cancel): ", env_name);
+                    std::io::stdout().flush()?;
+                    let mut key = String::new();
+                    std::io::stdin().read_line(&mut key)?;
+                    let key = key.trim();
+                    if key.is_empty() {
+                        println!("Cancelled.");
+                        return Ok(None);
+                    }
+                    std::env::set_var(env_name, key);
+                    // Update the provider profile with the new key
+                    save_model_provider_profile(
+                        custom_name,
+                        provider.provider_type(),
+                        provider.base_url(),
+                        env_name,
+                        Some(key),
+                        &provider.models().iter().cloned().collect::<Vec<_>>(),
+                        provider.default_model().unwrap_or(""),
+                    )?;
+                    if let Some(default_model) = provider.default_model() {
+                        return Ok(Some(format!("{custom_name}/{default_model}")));
+                    }
+                    return Ok(Some(custom_name.to_string()));
+                }
+            }
+        }
+    }
+
+    Err(format!(
+        "Could not authenticate with custom provider '{custom_name}'."
+    )
+    .into())
 }
 
 fn run_auth_command(provider: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
@@ -8599,6 +8711,41 @@ fn run_auth_command(provider: Option<&str>) -> Result<(), Box<dyn std::error::Er
                 model = template.default_model
             );
             return Ok(());
+        }
+
+        // Try custom provider from .claw.json / settings.json
+        if let Ok(cwd) = env::current_dir() {
+            if let Ok(config) = ConfigLoader::default_for(&cwd).load() {
+                if let Some(provider) = config.model_providers().get(provider_id) {
+                    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+                        return Err(format!(
+                            "Authentication requires a terminal. Set the environment variable instead:\n\
+                             \n\
+                             export {}=<key>",
+                            provider.api_key_env().unwrap_or("API_KEY")
+                        )
+                        .into());
+                    }
+                    if let Some(env_name) = provider.api_key_env() {
+                        print!("Enter {} (or press Enter to cancel): ", env_name);
+                        std::io::stdout().flush()?;
+                        let mut key = String::new();
+                        std::io::stdin().read_line(&mut key)?;
+                        let key = key.trim();
+                        if key.is_empty() {
+                            println!("Cancelled.");
+                            return Ok(());
+                        }
+                        std::env::set_var(env_name, key);
+                        println!("Authentication set for {provider_id}.");
+                        return Ok(());
+                    }
+                    return Err(format!(
+                        "provider '{provider_id}' has no apiKeyEnv configured. Add it to your .claw.json."
+                    )
+                    .into());
+                }
+            }
         }
 
         return Err(format!(
