@@ -24,11 +24,11 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use api::{
-    anthropic_has_auth, detect_provider_kind, has_api_key, resolve_startup_auth_source,
-    AnthropicClient, AuthSource, ContentBlockDelta, InputContentBlock, InputMessage,
-    MessageRequest, MessageResponse, OutputContentBlock, PromptCache,
-    ProviderClient as ApiProviderClient, ProviderKind, StreamEvent as ApiStreamEvent, ToolChoice,
-    ToolDefinition, ToolResultContentBlock,
+    anthropic_has_auth, detect_provider_kind, has_api_key, metadata_for_model,
+    resolve_startup_auth_source, AnthropicClient, AuthSource, ContentBlockDelta, InputContentBlock,
+    InputMessage, MessageRequest, MessageResponse, OutputContentBlock, PromptCache,
+    ProviderClient as ApiProviderClient, ProviderKind, ProviderMetadata,
+    StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock,
 };
 
 use commands::{
@@ -1555,8 +1555,17 @@ fn configured_provider_for_model(
     let api_key = if let Some(api_key) = provider.api_key().filter(|value| !value.is_empty()) {
         api_key.to_string()
     } else if let Some(env_name) = provider.api_key_env() {
-        env::var(env_name)
-            .map_err(|_| format!("model provider '{provider_name}' requires env var {env_name}"))?
+        if let Ok(key) = env::var(env_name) {
+            key
+        } else if let Ok(Some(token_set)) = runtime::load_provider_oauth(provider_name) {
+            // Fall back to saved OAuth bearer token when env var is unset
+            token_set.access_token
+        } else {
+            return Err(format!(
+                "model provider '{provider_name}' requires env var {env_name}"
+            )
+            .into());
+        }
     } else {
         return Err(
             format!("model provider '{provider_name}' requires apiKeyEnv or apiKey").into(),
@@ -8313,16 +8322,35 @@ const BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
 
 fn check_model_auth_available(model: &str) -> Result<bool, Box<dyn std::error::Error>> {
     let resolved = api::resolve_model_alias(model);
+
+    // Use metadata_for_model for prefix-aware auth checking so each provider
+    // gets its correct env var and OAuth store key.
+    if let Some(meta) = api::metadata_for_model(&resolved) {
+        let has_env = has_api_key(meta.auth_env);
+        let has_oauth = match meta.auth_env {
+            "OPENAI_API_KEY" => {
+                runtime::load_provider_oauth("openai").ok().flatten().is_some()
+            }
+            "MOONSHOT_API_KEY" => {
+                runtime::load_provider_oauth("moonshot").ok().flatten().is_some()
+            }
+            _ => false,
+        };
+        return Ok(has_env || has_oauth);
+    }
+
+    // For bare model names without recognized prefix, fall back to
+    // provider-kind detection (env-var sniffing + last-resort defaults).
     let provider = detect_provider_kind(&resolved);
     let available = match provider {
         ProviderKind::Anthropic => anthropic_has_auth().unwrap_or(false),
-        ProviderKind::Xai => {
-            has_api_key("XAI_API_KEY")
-        }
+        ProviderKind::Xai => has_api_key("XAI_API_KEY"),
         ProviderKind::OpenAi => {
             has_api_key("OPENAI_API_KEY")
                 || has_api_key("DASHSCOPE_API_KEY")
+                || has_api_key("MOONSHOT_API_KEY")
                 || runtime::load_provider_oauth("openai").ok().flatten().is_some()
+                || runtime::load_provider_oauth("moonshot").ok().flatten().is_some()
         }
     };
     Ok(available)

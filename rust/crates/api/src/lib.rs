@@ -25,7 +25,7 @@ pub use providers::openai_compat::{
 };
 pub use providers::{
     detect_provider_kind, max_tokens_for_model, max_tokens_for_model_with_override,
-    resolve_model_alias, ProviderKind,
+    metadata_for_model, resolve_model_alias, ProviderKind, ProviderMetadata,
 };
 pub use sse::{parse_frame, SseParser};
 pub use types::{

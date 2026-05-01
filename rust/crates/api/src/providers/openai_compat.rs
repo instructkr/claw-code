@@ -19,6 +19,7 @@ use super::{preflight_message_request, Provider, ProviderFuture};
 pub const DEFAULT_XAI_BASE_URL: &str = "https://api.x.ai/v1";
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 pub const DEFAULT_DASHSCOPE_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
+pub const DEFAULT_MOONSHOT_BASE_URL: &str = "https://api.moonshot.ai/v1";
 const REQUEST_ID_HEADER: &str = "request-id";
 const ALT_REQUEST_ID_HEADER: &str = "x-request-id";
 const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
@@ -41,11 +42,13 @@ pub struct OpenAiCompatConfig {
 const XAI_ENV_VARS: &[&str] = &["XAI_API_KEY"];
 const OPENAI_ENV_VARS: &[&str] = &["OPENAI_API_KEY"];
 const DASHSCOPE_ENV_VARS: &[&str] = &["DASHSCOPE_API_KEY"];
+const MOONSHOT_ENV_VARS: &[&str] = &["MOONSHOT_API_KEY"];
 
 // Provider-specific request body size limits in bytes
 const XAI_MAX_REQUEST_BODY_BYTES: usize = 52_428_800; // 50MB
 const OPENAI_MAX_REQUEST_BODY_BYTES: usize = 104_857_600; // 100MB
 const DASHSCOPE_MAX_REQUEST_BODY_BYTES: usize = 6_291_456; // 6MB (observed limit in dogfood)
+const MOONSHOT_MAX_REQUEST_BODY_BYTES: usize = 52_428_800; // 50MB
 
 impl OpenAiCompatConfig {
     #[must_use]
@@ -85,12 +88,25 @@ impl OpenAiCompatConfig {
         }
     }
 
+    /// Moonshot AI native endpoint (Kimi family models).
+    #[must_use]
+    pub const fn moonshot() -> Self {
+        Self {
+            provider_name: "Moonshot",
+            api_key_env: "MOONSHOT_API_KEY",
+            base_url_env: "MOONSHOT_BASE_URL",
+            default_base_url: DEFAULT_MOONSHOT_BASE_URL,
+            max_request_body_bytes: MOONSHOT_MAX_REQUEST_BODY_BYTES,
+        }
+    }
+
     #[must_use]
     pub fn credential_env_vars(self) -> &'static [&'static str] {
         match self.provider_name {
             "xAI" => XAI_ENV_VARS,
             "OpenAI" => OPENAI_ENV_VARS,
             "DashScope" => DASHSCOPE_ENV_VARS,
+            "Moonshot" => MOONSHOT_ENV_VARS,
             _ => &[],
         }
     }

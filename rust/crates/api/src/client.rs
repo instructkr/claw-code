@@ -32,19 +32,22 @@ impl ProviderClient {
                 OpenAiCompatConfig::xai(),
             )?)),
             ProviderKind::OpenAi => {
-                // DashScope models (qwen-*) also return ProviderKind::OpenAi because they
-                // speak the OpenAI wire format, but they need the DashScope config which
-                // reads DASHSCOPE_API_KEY and points at dashscope.aliyuncs.com.
-                let config = match providers::metadata_for_model(&resolved_model) {
+                // Use metadata_for_model for prefix-aware config selection.
+                // DashScope models (qwen-*, kimi-*) and Moonshot models (moonshot/*)
+                // all speak the OpenAI wire format but need different configs.
+                let (config, oauth_provider_id) = match providers::metadata_for_model(&resolved_model) {
                     Some(meta) if meta.auth_env == "DASHSCOPE_API_KEY" => {
-                        OpenAiCompatConfig::dashscope()
+                        (OpenAiCompatConfig::dashscope(), None)
                     }
-                    _ => OpenAiCompatConfig::openai(),
+                    Some(meta) if meta.auth_env == "MOONSHOT_API_KEY" => {
+                        (OpenAiCompatConfig::moonshot(), Some("moonshot"))
+                    }
+                    _ => (OpenAiCompatConfig::openai(), Some("openai")),
                 };
-                // Try OAuth for OpenAI if env var is not set
-                if config.provider_name == "OpenAI" {
+                // Try OAuth if the provider supports it and env var is not set
+                if let Some(provider_id) = oauth_provider_id {
                     Ok(Self::OpenAi(OpenAiCompatClient::from_env_or_oauth(
-                        config, "openai",
+                        config, provider_id,
                     )?))
                 } else {
                     Ok(Self::OpenAi(OpenAiCompatClient::from_env(config)?))
