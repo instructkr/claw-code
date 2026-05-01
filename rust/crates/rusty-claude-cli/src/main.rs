@@ -8439,42 +8439,7 @@ fn run_provider_welcome(
         );
     }
 
-    // Load custom providers from .claw.json that need authentication
-    let custom_providers: Vec<(String, String)> = if let Ok(cwd) = env::current_dir() {
-        if let Ok(config) = ConfigLoader::default_for(&cwd).load() {
-            config
-                .model_providers()
-                .iter()
-                .filter(|(name, _)| {
-                    // Exclude providers already shown as built-in or templates
-                    !BUILTIN_PROVIDERS.iter().any(|p| p.id == name.as_str())
-                        && !LOGIN_PROVIDER_TEMPLATES.iter().any(|t| t.id == name.as_str())
-                })
-                .filter(|(_, provider)| {
-                    // Only show providers that actually need auth (have apiKeyEnv)
-                    provider.api_key_env().is_some()
-                })
-                .map(|(name, provider)| (name.clone(), provider.provider_type().to_string()))
-                .collect()
-        } else {
-            Vec::new()
-        }
-    } else {
-        Vec::new()
-    };
-    let custom_count = custom_providers.len();
-
-    if !custom_providers.is_empty() {
-        println!("\n  Custom providers:");
-        for (i, (name, provider_type)) in custom_providers.iter().enumerate() {
-            println!(
-                "  {}. {name} ({provider_type})",
-                builtin_count + template_count + i + 1
-            );
-        }
-    }
-
-    let total = builtin_count + template_count + custom_count;
+    let total = builtin_count + template_count;
 
     print!("\nEnter number (1-{total}): ");
     std::io::stdout().flush()?;
@@ -8571,50 +8536,8 @@ fn run_provider_welcome(
         template.default_model,
     )?;
 
-    // Custom provider from .claw.json selected
-    let custom_index = index - builtin_count - template_count - 1;
-    let custom_name = custom_providers
-        .get(custom_index)
-        .map(|(name, _)| name.as_str())
-        .expect("valid custom provider index");
-
-    if let Ok(cwd) = env::current_dir() {
-        if let Ok(config) = ConfigLoader::default_for(&cwd).load() {
-            if let Some(provider) = config.model_providers().get(custom_name) {
-                if let Some(env_name) = provider.api_key_env() {
-                    print!("Enter {} (or press Enter to cancel): ", env_name);
-                    std::io::stdout().flush()?;
-                    let mut key = String::new();
-                    std::io::stdin().read_line(&mut key)?;
-                    let key = key.trim();
-                    if key.is_empty() {
-                        println!("Cancelled.");
-                        return Ok(None);
-                    }
-                    std::env::set_var(env_name, key);
-                    // Update the provider profile with the new key
-                    save_model_provider_profile(
-                        custom_name,
-                        provider.provider_type(),
-                        provider.base_url(),
-                        env_name,
-                        Some(key),
-                        &provider.models().iter().cloned().collect::<Vec<_>>(),
-                        provider.default_model().unwrap_or(""),
-                    )?;
-                    if let Some(default_model) = provider.default_model() {
-                        return Ok(Some(format!("{custom_name}/{default_model}")));
-                    }
-                    return Ok(Some(custom_name.to_string()));
-                }
-            }
-        }
-    }
-
-    Err(format!(
-        "Could not authenticate with custom provider '{custom_name}'."
-    )
-    .into())
+    // No custom providers in welcome — only built-in and templates.
+    Err("Invalid selection".into())
 }
 
 fn run_auth_command(provider: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
