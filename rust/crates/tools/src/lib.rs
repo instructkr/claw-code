@@ -5521,6 +5521,36 @@ fn load_provider_fallback_config() -> ProviderFallbackConfig {
         })
 }
 
+/// Context window size for Claude 4 models (128k tokens).
+const CLAUDE_4_CONTEXT_WINDOW: u32 = 131_072;
+
+/// Minimum max_tokens to ensure model can still generate meaningful output.
+const MIN_MAX_TOKENS: u32 = 8_192;
+
+/// Calculate max_tokens that fits within context window given input size.
+fn max_tokens_for_request(model: &str, estimated_input_tokens: u32) -> u32 {
+    let base_max = max_tokens_for_model(model);
+    let available = CLAUDE_4_CONTEXT_WINDOW.saturating_sub(estimated_input_tokens);
+    let with_buffer = available.saturating_sub(4_000);
+    base_max.min(with_buffer).max(MIN_MAX_TOKENS)
+}
+
+/// Estimate input tokens for a request.
+fn estimate_input_tokens(messages: &[InputMessage], system: Option<&str>) -> u32 {
+    let mut estimate: u32 = 0;
+    if let Some(sys) = system {
+        estimate = estimate.saturating_add((sys.len() / 4 + 1) as u32);
+    }
+    for msg in messages {
+        estimate = estimate.saturating_add((msg.role.len() / 4 + 1) as u32);
+        for block in &msg.content {
+            let block_text = serde_json::to_string(block).unwrap_or_default();
+            estimate = estimate.saturating_add((block_text.len() / 4 + 1) as u32);
+        }
+    }
+    estimate
+}
+
 impl ApiClient for ProviderRuntimeClient {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
         let tools = tool_specs_for_allowed_tools(Some(&self.allowed_tools))
@@ -5536,13 +5566,17 @@ impl ApiClient for ProviderRuntimeClient {
             (!request.system_prompt.is_empty()).then(|| request.system_prompt.join("\n\n"));
         let tool_choice = (!self.allowed_tools.is_empty()).then_some(ToolChoice::Auto);
 
+        // Estimate input size for dynamic max_tokens calculation
+        let estimated_input = estimate_input_tokens(&messages, system.as_deref());
+
         let runtime = &self.runtime;
         let chain = &self.chain;
         let mut last_error: Option<ApiError> = None;
         for (index, entry) in chain.iter().enumerate() {
+            let dynamic_max = max_tokens_for_request(&entry.model, estimated_input);
             let message_request = MessageRequest {
                 model: entry.model.clone(),
-                max_tokens: max_tokens_for_model(&entry.model),
+                max_tokens: dynamic_max,
                 messages: messages.clone(),
                 system: system.clone(),
                 tools: (!tools.is_empty()).then(|| tools.clone()),
